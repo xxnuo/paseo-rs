@@ -107,12 +107,18 @@ function toToolCallTimelineItem(envelope: CodexResolvedToolCall): ToolCallTimeli
       : parsedDetail;
 
   if (envelope.status === "failed") {
+    let message = "Tool call failed";
+    const commandFailed =
+      detail?.type === "shell" && detail.exitCode != null && detail.exitCode !== 0;
+    if (commandFailed) {
+      message = `Command exited with code ${detail.exitCode}`;
+    }
     return {
       type: "tool_call",
       callId: envelope.callId,
       name,
       status: "failed",
-      error: envelope.error ?? { message: "Tool call failed" },
+      error: envelope.error ?? { message },
       detail,
       ...(envelope.metadata ? { metadata: envelope.metadata } : {}),
     };

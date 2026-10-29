@@ -150,6 +150,73 @@ describe("codex tool-call mapper", () => {
     });
   });
 
+  it.each([
+    {
+      label: "RTK test failure",
+      exitCode: 1,
+      output: "Go test: 8 passed, 8 failed in 1 packages\n",
+      error: undefined,
+      expectedError: { message: "Command exited with code 1" },
+    },
+    {
+      label: "empty output",
+      exitCode: 127,
+      output: "",
+      error: undefined,
+      expectedError: { message: "Command exited with code 127" },
+    },
+    {
+      label: "explicit provider error",
+      exitCode: 1,
+      output: "permission denied\n",
+      error: { message: "Sandbox denied command", code: "sandbox_denied" },
+      expectedError: { message: "Sandbox denied command", code: "sandbox_denied" },
+    },
+    {
+      label: "tool failure despite a successful process",
+      exitCode: 0,
+      output: "Process finished before the tool failed\n",
+      error: undefined,
+      expectedError: { message: "Tool call failed" },
+    },
+    {
+      label: "unknown exit code",
+      exitCode: null,
+      output: "Command was declined\n",
+      error: undefined,
+      expectedError: { message: "Tool call failed" },
+    },
+  ])("preserves failed command details: $label", ({ exitCode, output, error, expectedError }) => {
+    const command = "rtk go test ./internal/utils/ai -count=1";
+    const item = expectMapped(
+      mapCodexToolCallFromThreadItem({
+        type: "commandExecution",
+        id: "codex-failed-tests",
+        status: "failed",
+        command: ["/bin/bash", "-lc", command],
+        cwd: "/tmp/repo",
+        aggregatedOutput: output,
+        exitCode,
+        error,
+      }),
+    );
+
+    expect(item).toEqual({
+      type: "tool_call",
+      callId: "codex-failed-tests",
+      name: "shell",
+      status: "failed",
+      error: expectedError,
+      detail: {
+        type: "shell",
+        command,
+        cwd: "/tmp/repo",
+        ...(output ? { output } : {}),
+        ...(exitCode != null ? { exitCode } : {}),
+      },
+    });
+  });
+
   it("maps running known tool variants with detail for early summaries", () => {
     const readItem = mapCodexToolCallFromThreadItem(
       {
