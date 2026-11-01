@@ -761,3 +761,17 @@ test("Nix desktop packaging resolves the workspace-local builder", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("fork Pages deployment uses account variables and a deployment-only secret", () => {
+  const source = readFileSync(new URL(".github/workflows/deploy-app.yml", repoRoot), "utf8");
+  assert.match(source, /branches:\s*\n\s+- refactor-rust/);
+  assert.match(source, /contents: read/);
+  assert.match(source, /vars\.CLOUDFLARE_ACCOUNT_ID/);
+  assert.match(source, /vars\.CLOUDFLARE_PAGES_PROJECT/);
+  assert.doesNotMatch(source, /10ed39a1dbf316e30abd0c409bed40d6/);
+  assert.match(source, /npm run build:web --workspace=@getpaseo\/app/);
+  assert.match(source, /wrangler pages deploy dist/);
+  assert.match(source, /--branch refactor-rust/);
+  assert.equal((source.match(/secrets\.CLOUDFLARE_API_TOKEN/g) ?? []).length, 1);
+  assert.ok(source.indexOf("Build web assets") < source.indexOf("secrets.CLOUDFLARE_API_TOKEN"));
+});
