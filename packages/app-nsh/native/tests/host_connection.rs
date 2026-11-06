@@ -237,9 +237,9 @@ fn switching_workspaces_uses_their_real_directories_and_ignores_the_old_provider
     app.press("role:button[LIVE_PUMP_PROJECT]").unwrap();
     app.wait_for("正在加载工作区…").unwrap();
     app.run_for(Duration::from_secs(6)).unwrap();
-    app.press("role:button[工作区：worktree-1 · 空闲]").unwrap();
+    app.press("text:工作区：worktree-1 · 空闲").unwrap();
     app.wait_for("服务商目录：/fixture/worktree-1").unwrap();
-    app.press("role:button[工作区：worktree-2 · 空闲]").unwrap();
+    app.press("text:工作区：worktree-2 · 空闲").unwrap();
     app.wait_for("服务商目录：/fixture/worktree-2").unwrap();
     app.run_for(Duration::from_secs(3)).unwrap();
     app.wait_for("服务商：CURRENT_WORKTREE · 可用").unwrap();

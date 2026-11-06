@@ -51,7 +51,7 @@ struct Directory<T> {
     label: &'static str,
 }
 
-impl<T: 'static> Directory<T> {
+impl<T: PartialEq + 'static> Directory<T> {
     fn new(label: &'static str) -> Rc<Self> {
         Rc::new(Self {
             request: RequestTask::new(),
