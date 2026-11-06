@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { createPaseoClient } from "@getpaseo/client";
+import {
+  createPaseoClient,
+  type PaseoAgentHandle,
+  type PaseoAgentTimelineEvent,
+} from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { createTestPaseoDaemon } from "../packages/server/src/server/test-utils/paseo-daemon.js";
 import { createTestAgentClients } from "../packages/server/src/server/test-utils/fake-agent-client.js";
@@ -22,6 +26,32 @@ interface AndroidReverse {
   run: RunAdb;
   serial: string;
   port: string;
+}
+
+async function completeTimeline(agent: PaseoAgentHandle) {
+  let page = await agent.timeline.refetch({
+    direction: "tail",
+    limit: 50,
+    projection: "projected",
+  });
+  assert.equal(page.error, null);
+  const rows = new Map(page.entries.map((entry) => [`${entry.seqStart}:${entry.seqEnd}`, entry]));
+  let pages = 1;
+  while (page.hasOlder) {
+    const cursor = page.startCursor;
+    assert(cursor, "An older history page must have a start cursor");
+    page = await agent.timeline.refetch({
+      direction: "before",
+      cursor,
+      limit: 50,
+      projection: "projected",
+    });
+    assert.equal(page.error, null);
+    assert(page.startCursor && page.startCursor.seq < cursor.seq, "History cursor must advance");
+    for (const entry of page.entries) rows.set(`${entry.seqStart}:${entry.seqEnd}`, entry);
+    pages += 1;
+  }
+  return { entries: [...rows.values()], pages };
 }
 
 function mappingTarget(list: string, port: string): string | undefined {
@@ -162,7 +192,40 @@ try {
     gitOptions,
   );
   await git("git", ["worktree", "add", "--detach", worktreeCwd, "HEAD"], gitOptions);
-  const agentClients = createTestAgentClients();
+  const startedPrompts: string[] = [];
+  let interruptions = 0;
+  const permissionResponses: { behavior: string; selectedActionId?: string }[] = [];
+  const permissionActions = [
+    { id: "nsh-fixture-allow", label: "本次允许", behavior: "allow" as const },
+    { id: "nsh-fixture-deny", label: "本次拒绝", behavior: "deny" as const },
+  ];
+  const agentClients = createTestAgentClients({
+    onStartTurn: (prompt) => {
+      if (typeof prompt === "string") startedPrompts.push(prompt);
+    },
+    onInterrupt: () => {
+      interruptions += 1;
+    },
+  });
+  const createSession = agentClients.codex.createSession.bind(agentClients.codex);
+  agentClients.codex.createSession = async (...args) => {
+    const session = await createSession(...args);
+    const subscribe = session.subscribe.bind(session);
+    session.subscribe = (callback) =>
+      subscribe((event) => {
+        if (event.type === "permission_requested") {
+          // Mutate the fake provider's actual pending request, so refresh sees the same backend actions.
+          event.request.actions = permissionActions;
+        }
+        callback(event);
+      });
+    const respond = session.respondToPermission.bind(session);
+    session.respondToPermission = async (requestId, response) => {
+      permissionResponses.push({ ...response });
+      await respond(requestId, response);
+    };
+    return session;
+  };
   // Deliberate fake catalog marker: proves the Rust draft RPC used the selected worktree cwd.
   // This is fixture metadata only, and never sends a prompt or invokes a model.
   agentClients.codex.listFeatures = async (config) => [
@@ -198,7 +261,7 @@ try {
     source: { kind: "directory", path: worktreeCwd, projectId: project.projectId },
   });
   const worktreeAgent = await worktree.agents.create({
-    config: { provider: "codex/gpt-5.4-mini", modeId: "full-access" },
+    config: { provider: "codex/gpt-5.4-mini", modeId: "default" },
     title: "Rust worktree fixture (fake provider, no model)",
   });
   const workspaces = await seed.workspaces.list({
@@ -266,6 +329,104 @@ try {
     workspaces: `text:已加载 ${workspaces.entries.length} 个工作区`,
     agents: `text:已加载 ${agents.entries.length} 个Agent`,
   };
+  // Real persisted daemon history, with an early page that cannot fit in the first 50 rows.
+  const historyTurns = 64;
+  for (let index = 0; index < historyTurns; index += 1) {
+    const ordinal = String(index).padStart(3, "0");
+    await daemon.daemon.agentManager.appendTimelineItem(worktreeAgent.id, {
+      type: "user_message",
+      text: `NSH_HISTORY_USER_${ordinal}`,
+      messageId: `nsh-history-user-${ordinal}`,
+    });
+    await daemon.daemon.agentManager.appendTimelineItem(worktreeAgent.id, {
+      type: "assistant_message",
+      text: `NSH_HISTORY_REPLY_${ordinal}`,
+    });
+  }
+  const history = await completeTimeline(worktreeAgent);
+  assert(history.pages > 1, "The history fixture must require loading earlier pages");
+  assert.equal(history.entries.length, historyTurns * 2);
+  assert(
+    history.entries.some(
+      (entry) => entry.item.type === "user_message" && entry.item.text === "NSH_HISTORY_USER_000",
+    ),
+  );
+  assert(
+    history.entries.some(
+      (entry) =>
+        entry.item.type === "assistant_message" && entry.item.text === "NSH_HISTORY_REPLY_063",
+    ),
+  );
+  const chat = {
+    plain: "Respond with exactly: NSH_CHAT_STREAM_中文",
+    plainReply: "NSH_CHAT_STREAM_中文",
+    tool: "echo hello; Respond with exactly: NSH_CHAT_TOOL_OK",
+    toolReply: "NSH_CHAT_TOOL_OK",
+    denied: 'printf "ok" > nsh-chat-denied.txt; Respond with exactly: NSH_CHAT_DENIED_UNEXPECTED',
+    cancelled:
+      'printf "ok" > nsh-chat-cancelled.txt; Respond with exactly: NSH_CHAT_CANCEL_UNEXPECTED',
+    after: "Respond with exactly: NSH_CHAT_AFTER_CANCEL",
+    afterReply: "NSH_CHAT_AFTER_CANCEL",
+    allow: permissionActions[0],
+    deny: permissionActions[1],
+  };
+  const verifyChat = async () => {
+    const fetched = await completeTimeline(worktreeAgent);
+    for (const prompt of [chat.plain, chat.tool, chat.denied, chat.cancelled, chat.after]) {
+      assert.equal(
+        startedPrompts.filter((value) => value === prompt).length,
+        1,
+        "Each chat turn must start once",
+      );
+      assert.equal(
+        fetched.entries.filter(
+          (entry) => entry.item.type === "user_message" && entry.item.text === prompt,
+        ).length,
+        1,
+        "Each sent message must persist once",
+      );
+    }
+    for (const reply of [chat.plainReply, chat.toolReply, chat.afterReply]) {
+      assert(
+        fetched.entries.some(
+          (entry) => entry.item.type === "assistant_message" && entry.item.text === reply,
+        ),
+        `Missing persisted assistant reply: ${reply}`,
+      );
+    }
+    for (const reply of ["NSH_CHAT_DENIED_UNEXPECTED", "NSH_CHAT_CANCEL_UNEXPECTED"]) {
+      assert.equal(
+        fetched.entries.some(
+          (entry) => entry.item.type === "assistant_message" && entry.item.text === reply,
+        ),
+        false,
+        "A denied or cancelled tool must not finish with its assistant reply",
+      );
+    }
+    assert(
+      fetched.entries.some(
+        (entry) => entry.item.type === "tool_call" && entry.item.status === "completed",
+      ),
+    );
+    assert(
+      permissionResponses.some(
+        (response) => response.behavior === "allow" && response.selectedActionId === chat.allow.id,
+      ),
+    );
+    assert(
+      permissionResponses.some(
+        (response) => response.behavior === "deny" && response.selectedActionId === chat.deny.id,
+      ),
+    );
+    assert(interruptions >= 1, "The provider must actually receive cancellation");
+    await assert.rejects(access(path.join(worktreeCwd, "nsh-chat-denied.txt")));
+    await assert.rejects(access(path.join(worktreeCwd, "nsh-chat-cancelled.txt")));
+    const refreshed = (await worktreeAgent.refresh())?.agent;
+    assert.equal(refreshed?.status, "idle");
+    assert.equal(refreshed?.pendingPermissions.length, 0);
+    assert.equal(refreshed?.cwd, worktreeCwd);
+    assert.equal(refreshed?.workspaceId, workspace.id);
+  };
   console.log("Rust UI fixture: real loopback daemon and SDK seed, fake Codex provider (no model)");
   if (command === "--fixture-only") {
     // The public SDK requires provider/model, so use its shipped low-level driver to omit model/mode.
@@ -310,6 +471,76 @@ try {
       assert.equal(explicit.currentModeId, uiCreation.mode);
       const after = await seed.agents.list({ filter: { projectKeys: [project.projectId] } });
       assert.equal(after.entries.length, agents.entries.length + 2);
+
+      const stream: PaseoAgentTimelineEvent[] = [];
+      const observation = worktreeAgent.timeline.subscribe((event) => stream.push(event));
+      try {
+        await observation.ready;
+        assert.equal(
+          (
+            await worktreeAgent.run(chat.plain, {
+              clientMessageId: randomUUID(),
+              timeoutMs: 10_000,
+            })
+          ).status,
+          "idle",
+        );
+        const tool = await worktreeAgent.run(chat.tool, {
+          clientMessageId: randomUUID(),
+          timeoutMs: 10_000,
+        });
+        assert.equal(tool.status, "permission");
+        const request = tool.final?.pendingPermissions[0];
+        assert(request);
+        assert.deepEqual(request.actions, permissionActions);
+        await worktreeAgent.respondToPermission({
+          requestId: request.id,
+          response: { behavior: "allow", selectedActionId: chat.allow.id },
+        });
+        assert.equal((await worktreeAgent.waitForFinish(10_000)).status, "idle");
+
+        const denied = await worktreeAgent.run(chat.denied, {
+          clientMessageId: randomUUID(),
+          timeoutMs: 10_000,
+        });
+        assert.equal(denied.status, "permission");
+        assert(denied.final?.pendingPermissions[0]);
+        await worktreeAgent.respondToPermission({
+          requestId: denied.final.pendingPermissions[0].id,
+          response: { behavior: "deny", selectedActionId: chat.deny.id },
+        });
+        assert.equal((await worktreeAgent.waitForFinish(10_000)).status, "idle");
+
+        const cancelled = await worktreeAgent.run(chat.cancelled, {
+          clientMessageId: randomUUID(),
+          timeoutMs: 10_000,
+        });
+        assert.equal(cancelled.status, "permission");
+        await driver.cancelAgent(worktreeAgent.id);
+        assert.equal((await worktreeAgent.waitForFinish(10_000)).status, "idle");
+        assert.equal(
+          (
+            await worktreeAgent.run(chat.after, {
+              clientMessageId: randomUUID(),
+              timeoutMs: 10_000,
+            })
+          ).status,
+          "idle",
+        );
+        assert(
+          stream.some(
+            (value) =>
+              value.event.type === "timeline" &&
+              value.event.item.type === "assistant_message" &&
+              value.event.item.text === chat.plainReply.slice(0, 6),
+          ),
+          "The oracle must observe a streamed assistant fragment",
+        );
+        assert(stream.some((value) => value.event.type === "turn_canceled"));
+        await verifyChat();
+      } finally {
+        await observation.release();
+      }
     } finally {
       await driver.close();
     }
@@ -323,6 +554,8 @@ try {
         featureContextVerified: true,
         defaultAndExplicitCreationVerified: true,
         sameKeyDeduplicated: true,
+        historyPages: history.pages,
+        chatSendToolPermissionCancelVerified: true,
         fixture: "ready",
         rustUiExecuted: false,
       }),
