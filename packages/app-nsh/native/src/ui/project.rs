@@ -252,77 +252,80 @@ pub(super) fn page(
     let agent_client = state.client.clone();
     let provider_client = state.client.clone();
     nav_page().title(title.clone()).child(
-        scroll().flex_1().child(
-            view()
-                .p_4()
-                .gap_3()
-                .pb_safe_area_plus(px(16.0))
-                .bg(move || theme().background)
-                .child(text(format!("项目：{title}")).text_color(move || theme().foreground))
-                .child(
-                    text(state.project.project_root_path.clone())
-                        .text_color(move || theme().muted_foreground),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .child(button().on_press(back).p_3().child(text("返回项目列表")))
-                        .child(button().on_press(disconnect).p_3().child(text("断开连接"))),
-                )
-                .child(directory_controls(
-                    state.workspaces.clone(),
-                    move || refresh_workspaces.load_workspaces(false),
-                    move || more_workspaces.load_workspaces(true),
-                ))
-                .child(each(
-                    move || workspaces.get(),
-                    |workspace: &Rc<Workspace>| workspace.id.clone(),
-                    move |workspace, _| {
-                        button()
-                            .on_press(move || selected.set(vec![workspace.get_untracked()]))
-                            .p_3()
-                            .child(
-                                text(move || {
-                                    workspace.with(|workspace| {
-                                        format!(
-                                            "工作区：{} · {}",
-                                            workspace.name,
-                                            workspace_status(&workspace.status)
-                                        )
+        scroll()
+            .keyboard_taps(KeyboardTaps::Handled)
+            .flex_1()
+            .child(
+                view()
+                    .p_4()
+                    .gap_3()
+                    .pb_safe_area_plus(px(16.0))
+                    .bg(move || theme().background)
+                    .child(text(format!("项目：{title}")).text_color(move || theme().foreground))
+                    .child(
+                        text(state.project.project_root_path.clone())
+                            .text_color(move || theme().muted_foreground),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .child(button().on_press(back).p_3().child(text("返回项目列表")))
+                            .child(button().on_press(disconnect).p_3().child(text("断开连接"))),
+                    )
+                    .child(directory_controls(
+                        state.workspaces.clone(),
+                        move || refresh_workspaces.load_workspaces(false),
+                        move || more_workspaces.load_workspaces(true),
+                    ))
+                    .child(each(
+                        move || workspaces.get(),
+                        |workspace: &Rc<Workspace>| workspace.id.clone(),
+                        move |workspace, _| {
+                            button()
+                                .on_press(move || selected.set(vec![workspace.get_untracked()]))
+                                .p_3()
+                                .child(
+                                    text(move || {
+                                        workspace.with(|workspace| {
+                                            format!(
+                                                "工作区：{} · {}",
+                                                workspace.name,
+                                                workspace_status(&workspace.status)
+                                            )
+                                        })
                                     })
-                                })
-                                .text_color(move || theme().foreground),
-                            )
-                            .child(
-                                text(move || {
-                                    workspace.with(|workspace| workspace.directory().to_owned())
-                                })
-                                .text_color(move || theme().muted_foreground),
-                            )
-                    },
-                ))
-                // Selection creates a new owner for this exact directory, cancelling old provider/feature requests.
-                .child(each(
-                    move || selected.get(),
-                    |workspace: &Rc<Workspace>| {
-                        format!("{}:{}", workspace.id, workspace.directory())
-                    },
-                    move |workspace, _| {
-                        provider_panel(provider_client.clone(), workspace.get_untracked())
-                    },
-                ))
-                .child(directory_controls(
-                    state.agents.clone(),
-                    move || refresh_agents.load_agents(false),
-                    move || more_agents.load_agents(true),
-                ))
-                .child(each(
-                    move || agents.get(),
-                    |entry: &Rc<AgentEntry>| entry.agent.id.clone(),
-                    move |entry, _| agent_row(agent_client.clone(), entry),
-                )),
-        ),
+                                    .text_color(move || theme().foreground),
+                                )
+                                .child(
+                                    text(move || {
+                                        workspace.with(|workspace| workspace.directory().to_owned())
+                                    })
+                                    .text_color(move || theme().muted_foreground),
+                                )
+                        },
+                    ))
+                    // Selection creates a new owner for this exact directory, cancelling old provider/feature requests.
+                    .child(each(
+                        move || selected.get(),
+                        |workspace: &Rc<Workspace>| {
+                            format!("{}:{}", workspace.id, workspace.directory())
+                        },
+                        move |workspace, _| {
+                            provider_panel(provider_client.clone(), workspace.get_untracked())
+                        },
+                    ))
+                    .child(directory_controls(
+                        state.agents.clone(),
+                        move || refresh_agents.load_agents(false),
+                        move || more_agents.load_agents(true),
+                    ))
+                    .child(each(
+                        move || agents.get(),
+                        |entry: &Rc<AgentEntry>| entry.agent.id.clone(),
+                        move |entry, _| agent_row(agent_client.clone(), entry),
+                    )),
+            ),
     )
 }
 

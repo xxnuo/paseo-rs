@@ -260,101 +260,107 @@ pub(crate) fn screen() -> impl IntoElement {
         .flex_1()
         .child(
             nav_page().title("Paseo").child(
-                scroll().flex_1().child(
-                    view()
-                        .p_4()
-                        .gap_3()
-                        .pb_safe_area_plus(px(16.0))
-                        .bg(move || theme().background)
-                        .child(text("连接开发主机").text_color(move || theme().foreground))
-                        .child(
-                            input()
-                                .label("主机地址")
-                                .placeholder("ws://localhost:6767/ws")
-                                .disabled(move || busy.get() || connected.get())
-                                .value(move || address.get())
-                                .on_change(move |value: &str| {
-                                    address.set(value.to_owned());
-                                    status.set(String::new());
-                                })
-                                .on_submit(move |_: &str| check())
-                                .p_3()
-                                .border_1()
-                                .border_color(move || theme().input)
-                                .text_color(move || theme().foreground),
-                        )
-                        .child(
-                            button()
-                                .disabled(move || {
-                                    busy.get()
-                                        || connected.get()
-                                        || address.with(|value| value.trim().is_empty())
-                                })
-                                .on_press(check)
-                                .p_3()
-                                .child(text("检查地址").text_color(move || theme().primary)),
-                        )
-                        .child(
-                            button()
-                                .disabled(move || {
-                                    busy.get()
-                                        || connected.get()
-                                        || address.with(|value| value.trim().is_empty())
-                                })
-                                .on_press(connect)
-                                .p_3()
-                                .child(text("连接主机").text_color(move || theme().primary)),
-                        )
-                        .child(
-                            button()
-                                .disabled(move || busy.get() || !connected.get())
-                                .on_press(move || refresh_state.refresh())
-                                .p_3()
-                                .child(text("刷新项目").text_color(move || theme().primary)),
-                        )
-                        .child(
-                            button()
-                                .disabled(move || !busy.get() && !connected.get())
-                                .on_press(move || disconnect_state.disconnect())
-                                .p_3()
-                                .child(text("断开连接").text_color(move || theme().primary)),
-                        )
-                        .child(
-                            text(move || status.get()).text_color(move || theme().muted_foreground),
-                        )
-                        .child(
-                            text(move || {
-                                if projects_loaded.get()
-                                    && !busy.get()
-                                    && projects.with(Vec::is_empty)
-                                {
-                                    "暂无项目"
-                                } else {
-                                    ""
-                                }
-                            })
-                            .text_color(move || theme().foreground),
-                        )
-                        .child(each(
-                            move || projects.get(),
-                            |project: &Project| project.project_id.clone(),
-                            move |project, _| {
-                                let state = row_state.clone();
-                                button()
-                                    .disabled(move || busy.get())
-                                    .on_press(move || state.open_project(project.get_untracked()))
+                scroll()
+                    .keyboard_taps(KeyboardTaps::Handled)
+                    .flex_1()
+                    .child(
+                        view()
+                            .p_4()
+                            .gap_3()
+                            .pb_safe_area_plus(px(16.0))
+                            .bg(move || theme().background)
+                            .child(text("连接开发主机").text_color(move || theme().foreground))
+                            .child(
+                                input()
+                                    .label("主机地址")
+                                    .placeholder("ws://localhost:6767/ws")
+                                    .disabled(move || busy.get() || connected.get())
+                                    .value(move || address.get())
+                                    .on_change(move |value: &str| {
+                                        address.set(value.to_owned());
+                                        status.set(String::new());
+                                    })
+                                    .on_submit(move |_: &str| check())
                                     .p_3()
-                                    .child(
-                                        text(move || {
-                                            project.with(|project| {
-                                                project.project_display_name.clone()
-                                            })
+                                    .border_1()
+                                    .border_color(move || theme().input)
+                                    .text_color(move || theme().foreground),
+                            )
+                            .child(
+                                button()
+                                    .disabled(move || {
+                                        busy.get()
+                                            || connected.get()
+                                            || address.with(|value| value.trim().is_empty())
+                                    })
+                                    .on_press(check)
+                                    .p_3()
+                                    .child(text("检查地址").text_color(move || theme().primary)),
+                            )
+                            .child(
+                                button()
+                                    .disabled(move || {
+                                        busy.get()
+                                            || connected.get()
+                                            || address.with(|value| value.trim().is_empty())
+                                    })
+                                    .on_press(connect)
+                                    .p_3()
+                                    .child(text("连接主机").text_color(move || theme().primary)),
+                            )
+                            .child(
+                                button()
+                                    .disabled(move || busy.get() || !connected.get())
+                                    .on_press(move || refresh_state.refresh())
+                                    .p_3()
+                                    .child(text("刷新项目").text_color(move || theme().primary)),
+                            )
+                            .child(
+                                button()
+                                    .disabled(move || !busy.get() && !connected.get())
+                                    .on_press(move || disconnect_state.disconnect())
+                                    .p_3()
+                                    .child(text("断开连接").text_color(move || theme().primary)),
+                            )
+                            .child(
+                                text(move || status.get())
+                                    .text_color(move || theme().muted_foreground),
+                            )
+                            .child(
+                                text(move || {
+                                    if projects_loaded.get()
+                                        && !busy.get()
+                                        && projects.with(Vec::is_empty)
+                                    {
+                                        "暂无项目"
+                                    } else {
+                                        ""
+                                    }
+                                })
+                                .text_color(move || theme().foreground),
+                            )
+                            .child(each(
+                                move || projects.get(),
+                                |project: &Project| project.project_id.clone(),
+                                move |project, _| {
+                                    let state = row_state.clone();
+                                    button()
+                                        .disabled(move || busy.get())
+                                        .on_press(move || {
+                                            state.open_project(project.get_untracked())
                                         })
-                                        .text_color(move || theme().foreground),
-                                    )
-                            },
-                        )),
-                ),
+                                        .p_3()
+                                        .child(
+                                            text(move || {
+                                                project.with(|project| {
+                                                    project.project_display_name.clone()
+                                                })
+                                            })
+                                            .text_color(move || theme().foreground),
+                                        )
+                                },
+                            )),
+                    ),
             ),
         )
         .child(each(
