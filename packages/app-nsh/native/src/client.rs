@@ -4,6 +4,11 @@ use crate::host::ParsedHost;
 use crate::protocol::catalog::{
     self, AgentResult, Agents, CatalogResponse, ProviderFeatures, Providers, Workspaces,
 };
+use crate::protocol::conversation::{
+    self, ActiveTurnBehavior, AgentConfig, Cancelled, ChatSessionEvent, ConversationMessage,
+    Created, CreationKind, CreationSubscription, History, HistoryOptions, PermissionResponse,
+    RpcError, Sent, SessionSubscription, SubscriptionReleased, TimelineSubscription,
+};
 use crate::protocol::{self, HelloRejection, ProjectList, ServerEvent, ServerInfo};
 use nsh_core::{
     element::{Spawned, spawn, timer},
@@ -30,6 +35,7 @@ pub(crate) enum ClientError {
     Transport,
     PasswordRequired,
     IncorrectPassword,
+    RequestRejected,
 }
 
 impl ClientError {
@@ -41,6 +47,7 @@ impl ClientError {
             Self::Transport => "transport",
             Self::PasswordRequired => "password_required",
             Self::IncorrectPassword => "incorrect_password",
+            Self::RequestRejected => "request_rejected",
         }
     }
 }
@@ -54,11 +61,47 @@ impl fmt::Display for ClientError {
             Self::Transport => "无法与主机通信，请检查地址、网络与访问权限",
             Self::PasswordRequired => "主机需要密码，请填写密码后重新连接",
             Self::IncorrectPassword => "主机密码不正确，请修改后重新连接",
+            Self::RequestRejected => "主机拒绝了请求，请检查主机状态后重试",
         })
     }
 }
 
 impl std::error::Error for ClientError {}
+
+// Debug diagnostics never print daemon payloads, messages or provider options.
+pub(crate) enum ConversationError {
+    Client(ClientError),
+    Rpc(RpcError),
+    Unsupported(&'static str),
+}
+
+impl From<ClientError> for ConversationError {
+    fn from(error: ClientError) -> Self {
+        Self::Client(error)
+    }
+}
+
+impl fmt::Display for ConversationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Client(error) => fmt::Display::fmt(error, f),
+            Self::Rpc(error) => f.write_str(&error.error),
+            Self::Unsupported(message) => f.write_str(message),
+        }
+    }
+}
+
+impl fmt::Debug for ConversationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Client(_) => "ConversationError::Client",
+            Self::Rpc(_) => "ConversationError::Rpc",
+            Self::Unsupported(_) => "ConversationError::Unsupported",
+        })
+    }
+}
+
+impl std::error::Error for ConversationError {}
 
 impl From<HelloRejection> for ClientError {
     fn from(reason: HelloRejection) -> Self {
@@ -147,6 +190,7 @@ impl Client {
             .await?
         {
             PendingReply::Projects(value) => Ok(value),
+            PendingReply::RpcError(_) => Err(ClientError::RequestRejected),
             _ => Err(ClientError::InvalidProtocol),
         }
     }
@@ -162,6 +206,7 @@ impl Client {
             .await?
         {
             PendingReply::Providers(value) => Ok(value),
+            PendingReply::RpcError(_) => Err(ClientError::RequestRejected),
             _ => Err(ClientError::InvalidProtocol),
         }
     }
@@ -181,6 +226,7 @@ impl Client {
             .await?
         {
             PendingReply::Features(value) => Ok(value),
+            PendingReply::RpcError(_) => Err(ClientError::RequestRejected),
             _ => Err(ClientError::InvalidProtocol),
         }
     }
@@ -198,6 +244,7 @@ impl Client {
             .await?
         {
             PendingReply::Workspaces(value) => Ok(value),
+            PendingReply::RpcError(_) => Err(ClientError::RequestRejected),
             _ => Err(ClientError::InvalidProtocol),
         }
     }
@@ -212,6 +259,7 @@ impl Client {
             .map_err(|_| ClientError::InvalidProtocol)?;
         match self.request(ReplyKind::Agents, &request_id, wire).await? {
             PendingReply::Agents(value) => Ok(value),
+            PendingReply::RpcError(_) => Err(ClientError::RequestRejected),
             _ => Err(ClientError::InvalidProtocol),
         }
     }
@@ -227,7 +275,237 @@ impl Client {
             .await?
         {
             PendingReply::Agent(value) => Ok(value),
+            PendingReply::RpcError(_) => Err(ClientError::RequestRejected),
             _ => Err(ClientError::InvalidProtocol),
+        }
+    }
+
+    pub(crate) async fn create_agent(
+        &self,
+        config: &AgentConfig,
+        workspace_id: Option<&str>,
+        idempotency_key: Option<&str>,
+        subscribe: Option<bool>,
+    ) -> Result<Created, ConversationError> {
+        self.require_feature("creationLifecycle", "请更新主机后再创建或恢复会话")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let wire =
+            conversation::create_agent(&id, config, workspace_id, idempotency_key, subscribe)
+                .map_err(|_| ClientError::InvalidProtocol)?;
+        match self.chat_request(ReplyKind::Created, &id, wire).await? {
+            PendingReply::Created(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) async fn subscribe_creation(
+        &self,
+        kind: CreationKind,
+        idempotency_key: &str,
+        subscribe: Option<bool>,
+    ) -> Result<CreationSubscription, ConversationError> {
+        self.require_feature("creationLifecycle", "请更新主机后再创建或恢复会话")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let wire = conversation::subscribe_creation(&id, kind, idempotency_key, subscribe)
+            .map_err(|_| ClientError::InvalidProtocol)?;
+        match self
+            .chat_request(ReplyKind::CreationSubscription, &id, wire)
+            .await?
+        {
+            PendingReply::CreationSubscription(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    // These are connection-wide, last-query-wins selections while owned_subscriptions is absent
+    // from hello. A returned token does not turn a local listener into an independent subscription.
+    pub(crate) async fn set_session_events(
+        &self,
+        events: &[ChatSessionEvent],
+        notifications: Option<bool>,
+    ) -> Result<SessionSubscription, ConversationError> {
+        self.require_feature("explicitEventSubscriptions", "请更新主机后再订阅会话事件")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let wire = conversation::subscribe_session_events(&id, events, notifications);
+        match self
+            .chat_request(ReplyKind::SessionSubscription, &id, wire)
+            .await?
+        {
+            PendingReply::SessionSubscription(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) async fn set_timeline_subscription(
+        &self,
+        agent_ids: &[String],
+    ) -> Result<TimelineSubscription, ConversationError> {
+        self.require_feature("selectiveAgentTimeline", "请更新主机后再订阅会话时间线")?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let wire = conversation::subscribe_timeline(&id, agent_ids);
+        match self
+            .chat_request(ReplyKind::TimelineSubscription, &id, wire)
+            .await?
+        {
+            PendingReply::TimelineSubscription(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) async fn release_subscription(
+        &self,
+        subscription_id: &str,
+    ) -> Result<SubscriptionReleased, ConversationError> {
+        // Stop local delivery before waiting for the daemon to acknowledge release.
+        self.pending.events.release_token(subscription_id);
+        let id = uuid::Uuid::new_v4().to_string();
+        let wire = conversation::release_subscription(&id, subscription_id);
+        match self
+            .chat_request(ReplyKind::SubscriptionReleased, &id, wire)
+            .await?
+        {
+            PendingReply::SubscriptionReleased(value)
+                if value.subscription_id == subscription_id =>
+            {
+                Ok(value)
+            }
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) async fn fetch_timeline(
+        &self,
+        agent_id: &str,
+        options: &HistoryOptions,
+    ) -> Result<History, ConversationError> {
+        if options.whole_turns.is_some() {
+            self.require_feature("wholeTurnTimeline", "请更新主机后再按完整回合加载时间线")?;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let wire = conversation::fetch_timeline(&id, agent_id, options)
+            .map_err(|_| ClientError::InvalidProtocol)?;
+        match self.chat_request(ReplyKind::History, &id, wire).await? {
+            PendingReply::History(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) async fn send_message(
+        &self,
+        agent_id: &str,
+        message_id: &str,
+        text: &str,
+        active_turn_behavior: Option<ActiveTurnBehavior>,
+    ) -> Result<Sent, ConversationError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let wire =
+            conversation::send_message(&id, agent_id, message_id, text, active_turn_behavior);
+        // Keep accepted/error/deliveryStatus intact. An RPC reply is not a completed agent turn.
+        match self.chat_request(ReplyKind::Sent, &id, wire).await? {
+            PendingReply::Sent(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) async fn cancel_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Cancelled, ConversationError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        match self
+            .chat_request(
+                ReplyKind::Cancelled,
+                &id,
+                conversation::cancel_agent(&id, agent_id),
+            )
+            .await?
+        {
+            PendingReply::Cancelled(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) async fn respond_permission(
+        &self,
+        agent_id: &str,
+        permission_request_id: &str,
+        response: &PermissionResponse,
+    ) -> Result<(), ClientError> {
+        // This only confirms the socket write. permission_resolved carries the actual resolution.
+        if let Some(error) = self.pending.failure.get() {
+            return Err(error);
+        }
+        let wire = conversation::respond_permission(agent_id, permission_request_id, response);
+        if self.socket.write(WebSocketData::Text(wire)).await.is_err() {
+            fail_connection(&self.pending, &self.on_state, ClientError::Transport);
+            return Err(ClientError::Transport);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn listen_agent(
+        &self,
+        agent_id: &str,
+        subscription_id: Option<&str>,
+        handler: impl Fn(&ConversationMessage) + 'static,
+    ) -> Result<EventRegistration, ClientError> {
+        if let Some(error) = self.pending.failure.get() {
+            return Err(error);
+        }
+        Ok(self.pending.events.register(
+            EventTarget::Agent(agent_id.to_owned()),
+            subscription_id,
+            handler,
+        ))
+    }
+
+    pub(crate) fn listen_creation(
+        &self,
+        kind: CreationKind,
+        idempotency_key: &str,
+        subscription_id: Option<&str>,
+        handler: impl Fn(&ConversationMessage) + 'static,
+    ) -> Result<EventRegistration, ClientError> {
+        if let Some(error) = self.pending.failure.get() {
+            return Err(error);
+        }
+        Ok(self.pending.events.register(
+            EventTarget::Creation {
+                kind,
+                key: idempotency_key.to_owned(),
+            },
+            subscription_id,
+            handler,
+        ))
+    }
+
+    fn require_feature(
+        &self,
+        feature: &str,
+        message: &'static str,
+    ) -> Result<(), ConversationError> {
+        if self
+            .server_info
+            .features
+            .as_ref()
+            .and_then(|features| features.get(feature))
+            == Some(&serde_json::Value::Bool(true))
+        {
+            Ok(())
+        } else {
+            Err(ConversationError::Unsupported(message))
+        }
+    }
+
+    async fn chat_request(
+        &self,
+        kind: ReplyKind,
+        id: &str,
+        wire: String,
+    ) -> Result<PendingReply, ConversationError> {
+        match self.request(kind, id, wire).await? {
+            PendingReply::RpcError(error) => Err(ConversationError::Rpc(error)),
+            value => Ok(value),
         }
     }
 
@@ -260,10 +538,163 @@ impl Drop for Client {
     }
 }
 
+// This owns only a local callback. Drop/stop never claim that the daemon subscription was released;
+// the caller also awaits Client::release_subscription when it owns a returned server token.
+pub(crate) struct EventRegistration {
+    events: Rc<EventListeners>,
+    id: String,
+    listener: Rc<EventListener>,
+}
+
+impl EventRegistration {
+    pub(crate) fn set_subscription_id(
+        &self,
+        subscription_id: Option<String>,
+    ) -> Result<(), ClientError> {
+        if !self.listener.active.get() {
+            return Err(ClientError::Closed);
+        }
+        *self.listener.subscription_id.borrow_mut() = subscription_id;
+        Ok(())
+    }
+
+    pub(crate) fn stop(&self) {
+        self.listener.active.set(false);
+        self.events.listeners.borrow_mut().remove(&self.id);
+    }
+}
+
+impl Drop for EventRegistration {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+enum EventTarget {
+    Agent(String),
+    Creation { kind: CreationKind, key: String },
+}
+
+struct EventListener {
+    target: EventTarget,
+    subscription_id: RefCell<Option<String>>,
+    active: Cell<bool>,
+    handler: Box<dyn Fn(&ConversationMessage)>,
+}
+
+#[derive(Default)]
+struct EventListeners {
+    listeners: RefCell<HashMap<String, Rc<EventListener>>>,
+}
+
+impl EventListeners {
+    fn register(
+        self: &Rc<Self>,
+        target: EventTarget,
+        subscription_id: Option<&str>,
+        handler: impl Fn(&ConversationMessage) + 'static,
+    ) -> EventRegistration {
+        let id = uuid::Uuid::new_v4().to_string();
+        let listener = Rc::new(EventListener {
+            target,
+            subscription_id: RefCell::new(subscription_id.map(str::to_owned)),
+            active: Cell::new(true),
+            handler: Box::new(handler),
+        });
+        self.listeners
+            .borrow_mut()
+            .insert(id.clone(), listener.clone());
+        EventRegistration {
+            events: self.clone(),
+            id,
+            listener,
+        }
+    }
+
+    fn dispatch(&self, message: &ConversationMessage) {
+        // Never retain a RefCell borrow across UI callbacks: a callback may stop a listener.
+        let listeners: Vec<_> = self.listeners.borrow().values().cloned().collect();
+        for listener in listeners {
+            if listener.active.get() && listener.matches(message) {
+                (listener.handler)(message);
+            }
+        }
+    }
+
+    fn release_token(&self, token: &str) {
+        self.listeners.borrow_mut().retain(|_, listener| {
+            if listener.subscription_id.borrow().as_deref() == Some(token) {
+                listener.active.set(false);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn close(&self) {
+        let listeners = std::mem::take(&mut *self.listeners.borrow_mut());
+        for listener in listeners.into_values() {
+            listener.active.set(false);
+        }
+    }
+}
+
+impl EventListener {
+    fn matches(&self, message: &ConversationMessage) -> bool {
+        let (matches_target, token) = match (&self.target, message) {
+            (EventTarget::Creation { kind, key }, ConversationMessage::CreationUpdate(value)) => (
+                &value.kind == kind && &value.idempotency_key == key,
+                value.subscription_id.as_deref(),
+            ),
+            (EventTarget::Agent(id), ConversationMessage::Stream(value)) => {
+                (id == &value.agent_id, value.subscription_id.as_deref())
+            }
+            (EventTarget::Agent(id), ConversationMessage::PermissionRequested(value)) => {
+                (id == &value.agent_id, value.subscription_id.as_deref())
+            }
+            (EventTarget::Agent(id), ConversationMessage::PermissionResolved(value)) => {
+                (id == &value.agent_id, value.subscription_id.as_deref())
+            }
+            (EventTarget::Agent(id), ConversationMessage::AttentionRequired(value)) => {
+                (id == &value.agent_id, value.subscription_id.as_deref())
+            }
+            (EventTarget::Agent(id), ConversationMessage::TimelineReplacement(value)) => {
+                (id == &value.agent_id, value.subscription_id.as_deref())
+            }
+            (EventTarget::Agent(id), ConversationMessage::AgentStatus(value)) => {
+                (id == &value.agent_id, None)
+            }
+            (
+                EventTarget::Agent(id),
+                ConversationMessage::AgentUpdate(conversation::AgentUpdate::Upsert {
+                    agent,
+                    subscription_id,
+                    ..
+                }),
+            ) => (id == &agent.agent.id, subscription_id.as_deref()),
+            (
+                EventTarget::Agent(id),
+                ConversationMessage::AgentUpdate(conversation::AgentUpdate::Remove {
+                    agent_id,
+                    subscription_id,
+                    ..
+                }),
+            ) => (id == agent_id, subscription_id.as_deref()),
+            _ => return false,
+        };
+        // Legacy delivery omits tags, even when subscription responses return server IDs. A tag,
+        // when present, must match the explicitly bound subscription, never merely the agent ID.
+        matches_target
+            && token.is_none_or(|token| self.subscription_id.borrow().as_deref() == Some(token))
+    }
+}
+
 #[derive(Default)]
 struct PendingRequests {
     slots: RefCell<HashMap<String, Rc<RefCell<PendingSlot>>>>,
     failure: Cell<Option<ClientError>>,
+    events: Rc<EventListeners>,
 }
 
 struct PendingSlot {
@@ -275,11 +706,18 @@ struct PendingSlot {
 struct PendingGuard {
     pending: Rc<PendingRequests>,
     request_id: String,
+    slot: Rc<RefCell<PendingSlot>>,
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.pending.slots.borrow_mut().remove(&self.request_id);
+        let mut slots = self.pending.slots.borrow_mut();
+        if slots
+            .get(&self.request_id)
+            .is_some_and(|slot| Rc::ptr_eq(slot, &self.slot))
+        {
+            slots.remove(&self.request_id);
+        }
     }
 }
 
@@ -309,6 +747,9 @@ impl PendingRequests {
         if let Some(error) = self.failure.get() {
             return Err(error);
         }
+        if self.slots.borrow().contains_key(&request_id) {
+            return Err(ClientError::InvalidProtocol);
+        }
         let slot = Rc::new(RefCell::new(PendingSlot {
             expected,
             result: None,
@@ -321,12 +762,16 @@ impl PendingRequests {
             PendingGuard {
                 pending: self.clone(),
                 request_id,
+                slot: slot.clone(),
             },
             Response(slot),
         ))
     }
 
     fn dispatch(&self, event: ServerEvent) -> Result<(), ClientError> {
+        if let Some(error) = self.failure.get() {
+            return Err(error);
+        }
         let reply = match event {
             ServerEvent::Projects(value) => PendingReply::Projects(value),
             ServerEvent::Catalog(value) => match value {
@@ -336,8 +781,49 @@ impl PendingRequests {
                 CatalogResponse::Agents(value) => PendingReply::Agents(value),
                 CatalogResponse::Agent(value) => PendingReply::Agent(value),
             },
+            ServerEvent::Conversation(value) => match value {
+                ConversationMessage::Created(value) => PendingReply::Created(value),
+                ConversationMessage::CreationSubscription(value) => {
+                    PendingReply::CreationSubscription(value)
+                }
+                ConversationMessage::SessionSubscription(value) => {
+                    PendingReply::SessionSubscription(value)
+                }
+                ConversationMessage::TimelineSubscription(value) => {
+                    PendingReply::TimelineSubscription(value)
+                }
+                ConversationMessage::SubscriptionReleased(value) => {
+                    PendingReply::SubscriptionReleased(value)
+                }
+                ConversationMessage::History(value) => PendingReply::History(value),
+                ConversationMessage::Sent(value) => PendingReply::Sent(value),
+                ConversationMessage::Cancelled(value) => PendingReply::Cancelled(value),
+                ConversationMessage::RpcError(error) => {
+                    let slot = {
+                        let mut slots = self.slots.borrow_mut();
+                        if slots.get(&error.request_id).is_some_and(|slot| {
+                            error
+                                .request_type
+                                .as_deref()
+                                .is_none_or(|kind| kind == slot.borrow().expected.request_type())
+                        }) {
+                            slots.remove(&error.request_id)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(slot) = slot {
+                        deliver(&slot, Ok(PendingReply::RpcError(error)));
+                    }
+                    return Ok(());
+                }
+                event => {
+                    self.events.dispatch(&event);
+                    return Ok(());
+                }
+            },
             ServerEvent::HelloRejected(reason) => return Err(reason.into()),
-            // No event subscriptions are advertised yet. Unknown frames never resolve RPC slots.
+            // Unknown frames never resolve RPC slots or become successful chat events.
             ServerEvent::Unknown(_) | ServerEvent::Pong | ServerEvent::ServerInfo(_) => {
                 return Ok(());
             }
@@ -364,6 +850,7 @@ impl PendingRequests {
             return false;
         }
         self.failure.set(Some(error));
+        self.events.close();
         let slots = std::mem::take(&mut *self.slots.borrow_mut());
         for slot in slots.into_values() {
             deliver(&slot, Err(error));
@@ -380,6 +867,37 @@ enum ReplyKind {
     Workspaces,
     Agents,
     Agent,
+    Created,
+    CreationSubscription,
+    SessionSubscription,
+    TimelineSubscription,
+    SubscriptionReleased,
+    History,
+    Sent,
+    Cancelled,
+    RpcError,
+}
+
+impl ReplyKind {
+    fn request_type(self) -> &'static str {
+        match self {
+            Self::Projects => "project.list.request",
+            Self::Providers => "get_providers_snapshot_request",
+            Self::Features => "list_provider_features_request",
+            Self::Workspaces => "fetch_workspaces_request",
+            Self::Agents => "fetch_agents_request",
+            Self::Agent => "fetch_agent_request",
+            Self::Created => "agent.create.request",
+            Self::CreationSubscription => "creation.subscribe.request",
+            Self::SessionSubscription => "session.events.set_subscription.request",
+            Self::TimelineSubscription => "agent.timeline.set_subscription.request",
+            Self::SubscriptionReleased => "subscription.release.request",
+            Self::History => "fetch_agent_timeline_request",
+            Self::Sent => "send_agent_message_request",
+            Self::Cancelled => "cancel_agent_request",
+            Self::RpcError => "",
+        }
+    }
 }
 
 enum PendingReply {
@@ -389,6 +907,15 @@ enum PendingReply {
     Workspaces(Workspaces),
     Agents(Agents),
     Agent(AgentResult),
+    Created(Created),
+    CreationSubscription(CreationSubscription),
+    SessionSubscription(SessionSubscription),
+    TimelineSubscription(TimelineSubscription),
+    SubscriptionReleased(SubscriptionReleased),
+    History(History),
+    Sent(Sent),
+    Cancelled(Cancelled),
+    RpcError(RpcError),
 }
 
 impl PendingReply {
@@ -400,6 +927,15 @@ impl PendingReply {
             Self::Workspaces(_) => ReplyKind::Workspaces,
             Self::Agents(_) => ReplyKind::Agents,
             Self::Agent(_) => ReplyKind::Agent,
+            Self::Created(_) => ReplyKind::Created,
+            Self::CreationSubscription(_) => ReplyKind::CreationSubscription,
+            Self::SessionSubscription(_) => ReplyKind::SessionSubscription,
+            Self::TimelineSubscription(_) => ReplyKind::TimelineSubscription,
+            Self::SubscriptionReleased(_) => ReplyKind::SubscriptionReleased,
+            Self::History(_) => ReplyKind::History,
+            Self::Sent(_) => ReplyKind::Sent,
+            Self::Cancelled(_) => ReplyKind::Cancelled,
+            Self::RpcError(_) => ReplyKind::RpcError,
         }
     }
 
@@ -411,6 +947,15 @@ impl PendingReply {
             Self::Workspaces(value) => &value.request_id,
             Self::Agents(value) => &value.request_id,
             Self::Agent(value) => &value.request_id,
+            Self::Created(value) => &value.request_id,
+            Self::CreationSubscription(value) => &value.request_id,
+            Self::SessionSubscription(value) => &value.request_id,
+            Self::TimelineSubscription(value) => &value.request_id,
+            Self::SubscriptionReleased(value) => &value.request_id,
+            Self::History(value) => &value.request_id,
+            Self::Sent(value) => &value.request_id,
+            Self::Cancelled(value) => &value.request_id,
+            Self::RpcError(value) => &value.request_id,
         }
     }
 }
@@ -507,6 +1052,330 @@ mod tests {
             })
             .unwrap()["frame"]
             .clone()
+    }
+
+    fn conversation_capture() -> Vec<Value> {
+        serde_json::from_str(include_str!("../../protocol-fixtures/conversation.json")).unwrap()
+    }
+
+    fn conversation_frame(request_id: &str) -> Value {
+        conversation_capture()
+            .into_iter()
+            .find(|entry| {
+                entry["direction"] == "server"
+                    && entry["frame"]["message"]["payload"]["requestId"] == request_id
+            })
+            .unwrap()["frame"]
+            .clone()
+    }
+
+    fn stream_frame(agent_id: &str, subscription_id: Option<&str>) -> Value {
+        let mut frame = conversation_capture()
+            .into_iter()
+            .find(|entry| entry["frame"]["message"]["type"] == "agent_stream")
+            .unwrap()["frame"]
+            .clone();
+        frame["message"]["payload"]["agentId"] = json!(agent_id);
+        if let Some(id) = subscription_id {
+            frame["message"]["payload"]["subscriptionId"] = json!(id);
+        } else {
+            frame["message"]["payload"]
+                .as_object_mut()
+                .unwrap()
+                .remove("subscriptionId");
+        }
+        frame
+    }
+
+    #[test]
+    fn chat_and_subscription_replies_use_the_existing_single_reader_dispatch() {
+        let pending = Rc::new(PendingRequests::default());
+        let mut cx = Context::from_waker(Waker::noop());
+        for (id, expected) in [
+            ("chat-create", ReplyKind::Created),
+            ("chat-observe", ReplyKind::CreationSubscription),
+            ("chat-events", ReplyKind::SessionSubscription),
+            ("chat-timeline", ReplyKind::TimelineSubscription),
+            ("chat-send", ReplyKind::Sent),
+            ("chat-rejected", ReplyKind::Sent),
+            ("chat-cancel", ReplyKind::Cancelled),
+            ("chat-cancel-missing", ReplyKind::Cancelled),
+        ] {
+            let (_guard, response) = pending.register(id.into(), expected).unwrap();
+            let mut response = pin!(response);
+            pending.dispatch(event(&conversation_frame(id))).unwrap();
+            let Poll::Ready(Ok(reply)) = response.as_mut().poll(&mut cx) else {
+                panic!("chat reply not delivered")
+            };
+            assert_eq!(reply.kind(), expected);
+            if id == "chat-rejected" {
+                let PendingReply::Sent(sent) = reply else {
+                    panic!("not sent")
+                };
+                assert!(sent.accepted().is_err());
+            } else if id == "chat-cancel-missing" {
+                let PendingReply::Cancelled(cancelled) = reply else {
+                    panic!("not cancel")
+                };
+                assert!(matches!(
+                    cancelled.state(),
+                    conversation::CancelState::Failed(_)
+                ));
+            }
+        }
+        let timeline: Vec<Value> =
+            serde_json::from_str(include_str!("../../protocol-fixtures/timeline.json")).unwrap();
+        let (_guard, response) = pending
+            .register("fixture-history".into(), ReplyKind::History)
+            .unwrap();
+        pending
+            .dispatch(event(&timeline.last().unwrap()["frame"]))
+            .unwrap();
+        assert!(matches!(
+            pin!(response).as_mut().poll(&mut cx),
+            Poll::Ready(Ok(PendingReply::History(_)))
+        ));
+        let (_guard, response) = pending
+            .register("release".into(), ReplyKind::SubscriptionReleased)
+            .unwrap();
+        pending
+            .dispatch(event(
+                &json!({"type":"session","message":{"type":"subscription.release.response",
+            "payload":{"requestId":"release","subscriptionId":"server-token"}}}),
+            ))
+            .unwrap();
+        assert!(matches!(
+            pin!(response).as_mut().poll(&mut cx),
+            Poll::Ready(Ok(PendingReply::SubscriptionReleased(_)))
+        ));
+        assert!(pending.slots.borrow().is_empty());
+    }
+
+    #[test]
+    fn permission_identity_wrong_reply_kind_and_unknown_updates_never_complete_chat_rpcs() {
+        let pending = Rc::new(PendingRequests::default());
+        let (_guard, response) = pending
+            .register("chat-send".into(), ReplyKind::Sent)
+            .unwrap();
+        let mut response = pin!(response);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut wrong = conversation_frame("chat-cancel");
+        wrong["message"]["payload"]["requestId"] = json!("chat-send");
+        pending.dispatch(event(&wrong)).unwrap();
+        pending.dispatch(event(&json!({"type":"session","message":{"type":"agent_permission_resolved",
+            "payload":{"requestId":"chat-send","agentId":"agent","resolution":{"behavior":"allow"}}}}))).unwrap();
+        pending
+            .dispatch(event(
+                &json!({"type":"session","message":{"type":"future.chat.response",
+            "payload":{"requestId":"chat-send","accepted":true}}}),
+            ))
+            .unwrap();
+        pending
+            .dispatch(event(&stream_frame("agent", None)))
+            .unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(pending.slots.borrow().len(), 1);
+        pending
+            .dispatch(event(&conversation_frame("chat-send")))
+            .unwrap();
+        assert!(matches!(
+            response.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(PendingReply::Sent(_)))
+        ));
+    }
+
+    #[test]
+    fn cancelled_chat_requests_ignore_late_replies_without_an_old_guard_removing_a_new_slot() {
+        let pending = Rc::new(PendingRequests::default());
+        let (guard, response) = pending
+            .register("chat-send".into(), ReplyKind::Sent)
+            .unwrap();
+        assert_eq!(
+            pending.register("chat-send".into(), ReplyKind::Sent).err(),
+            Some(ClientError::InvalidProtocol)
+        );
+        let mut request = Box::pin(async move {
+            let _guard = guard;
+            response.await
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(request.as_mut().poll(&mut cx).is_pending());
+        drop(request);
+        pending
+            .dispatch(event(&conversation_frame("chat-send")))
+            .unwrap();
+        assert!(pending.slots.borrow().is_empty());
+        let (old_guard, old_response) = pending
+            .register("chat-send".into(), ReplyKind::Sent)
+            .unwrap();
+        pending
+            .dispatch(event(&conversation_frame("chat-send")))
+            .unwrap();
+        assert!(matches!(
+            pin!(old_response).as_mut().poll(&mut cx),
+            Poll::Ready(Ok(_))
+        ));
+        let (_new_guard, new_response) = pending
+            .register("chat-send".into(), ReplyKind::Sent)
+            .unwrap();
+        drop(old_guard);
+        assert_eq!(pending.slots.borrow().len(), 1);
+        pending
+            .dispatch(event(&conversation_frame("chat-send")))
+            .unwrap();
+        assert!(matches!(
+            pin!(new_response).as_mut().poll(&mut cx),
+            Poll::Ready(Ok(_))
+        ));
+    }
+
+    #[test]
+    fn correlated_rpc_errors_are_failures_and_cannot_reject_a_different_operation() {
+        let pending = Rc::new(PendingRequests::default());
+        let (_guard, response) = pending
+            .register("chat-send".into(), ReplyKind::Sent)
+            .unwrap();
+        let mut response = pin!(response);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut frame = json!({"type":"session","message":{"type":"rpc_error","payload":{
+            "requestId":"chat-send","requestType":"cancel_agent_request","error":"Provider refused","code":"denied"}}});
+        pending.dispatch(event(&frame)).unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
+        frame["message"]["payload"]["requestType"] = json!("send_agent_message_request");
+        pending.dispatch(event(&frame)).unwrap();
+        let Poll::Ready(Ok(PendingReply::RpcError(error))) = response.as_mut().poll(&mut cx) else {
+            panic!("not RPC failure")
+        };
+        let error = ConversationError::Rpc(error);
+        assert_eq!(error.to_string(), "Provider refused");
+        assert!(!format!("{error:?}").contains("Provider refused"));
+        let (_guard, response) = pending
+            .register("chat-send".into(), ReplyKind::Sent)
+            .unwrap();
+        frame["message"]["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("requestType");
+        pending.dispatch(event(&frame)).unwrap();
+        assert!(matches!(
+            pin!(response).as_mut().poll(&mut cx),
+            Poll::Ready(Ok(PendingReply::RpcError(_)))
+        ));
+    }
+
+    #[test]
+    fn local_listeners_filter_agent_and_subscription_and_stop_before_server_release() {
+        let pending = Rc::new(PendingRequests::default());
+        let seen = Rc::new(Cell::new(0));
+        let captured = seen.clone();
+        let listener =
+            pending
+                .events
+                .register(EventTarget::Agent("agent-a".into()), None, move |_| {
+                    captured.set(captured.get() + 1)
+                });
+        pending
+            .dispatch(event(&stream_frame("agent-b", None)))
+            .unwrap();
+        pending
+            .dispatch(event(&stream_frame("agent-a", Some("unknown-token"))))
+            .unwrap();
+        assert_eq!(seen.get(), 0);
+        // Legacy events can arrive before a subscription acknowledgement, without tags.
+        pending
+            .dispatch(event(&stream_frame("agent-a", None)))
+            .unwrap();
+        listener
+            .set_subscription_id(Some("token-a".into()))
+            .unwrap();
+        pending
+            .dispatch(event(&stream_frame("agent-a", Some("token-b"))))
+            .unwrap();
+        pending
+            .dispatch(event(&stream_frame("agent-a", Some("token-a"))))
+            .unwrap();
+        pending
+            .dispatch(event(&stream_frame("agent-a", None)))
+            .unwrap();
+        assert_eq!(seen.get(), 3);
+        pending.events.release_token("token-b");
+        assert_eq!(pending.events.listeners.borrow().len(), 1);
+        pending.events.release_token("token-a");
+        pending
+            .dispatch(event(&stream_frame("agent-a", None)))
+            .unwrap();
+        assert_eq!(seen.get(), 3);
+        assert_eq!(listener.set_subscription_id(None), Err(ClientError::Closed));
+        assert!(pending.events.listeners.borrow().is_empty());
+    }
+
+    #[test]
+    fn creation_listeners_receive_early_updates_by_key_and_kind_and_drop_locally() {
+        let pending = Rc::new(PendingRequests::default());
+        let seen = Rc::new(Cell::new(0));
+        let captured = seen.clone();
+        let listener = pending.events.register(
+            EventTarget::Creation {
+                kind: CreationKind::Agent,
+                key: "conversation-create".into(),
+            },
+            None,
+            move |_| captured.set(captured.get() + 1),
+        );
+        let mut update = conversation_capture()
+            .into_iter()
+            .find(|entry| entry["frame"]["message"]["type"] == "agent.create.update")
+            .unwrap()["frame"]
+            .clone();
+        pending.dispatch(event(&update)).unwrap();
+        assert_eq!(seen.get(), 1);
+        update["message"]["payload"]["idempotencyKey"] = json!("different-create");
+        pending.dispatch(event(&update)).unwrap();
+        update["message"]["payload"]["idempotencyKey"] = json!("conversation-create");
+        update["message"]["payload"]["kind"] = json!("workspace");
+        pending.dispatch(event(&update)).unwrap();
+        assert_eq!(seen.get(), 1);
+        update["message"]["payload"]["kind"] = json!("agent");
+        drop(listener);
+        pending.dispatch(event(&update)).unwrap();
+        assert_eq!(seen.get(), 1);
+        assert!(pending.events.listeners.borrow().is_empty());
+    }
+
+    #[test]
+    fn event_callbacks_can_unregister_reentrantly_and_connection_failure_stops_all_delivery() {
+        let pending = Rc::new(PendingRequests::default());
+        let handle = Rc::new(RefCell::new(None::<EventRegistration>));
+        let captured_handle = handle.clone();
+        let seen = Rc::new(Cell::new(0));
+        let captured_seen = seen.clone();
+        *handle.borrow_mut() = Some(pending.events.register(
+            EventTarget::Agent("agent".into()),
+            None,
+            move |_| {
+                captured_seen.set(captured_seen.get() + 1);
+                captured_handle.borrow_mut().take();
+            },
+        ));
+        pending
+            .dispatch(event(&stream_frame("agent", None)))
+            .unwrap();
+        pending
+            .dispatch(event(&stream_frame("agent", None)))
+            .unwrap();
+        assert_eq!(seen.get(), 1);
+        let listener = pending
+            .events
+            .register(EventTarget::Agent("agent".into()), None, |_| {
+                panic!("closed callback invoked")
+            });
+        pending.close(ClientError::Closed);
+        assert_eq!(
+            pending.dispatch(event(&stream_frame("agent", None))),
+            Err(ClientError::Closed)
+        );
+        assert_eq!(listener.set_subscription_id(None), Err(ClientError::Closed));
+        assert!(pending.events.listeners.borrow().is_empty());
     }
 
     #[test]
