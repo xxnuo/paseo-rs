@@ -350,8 +350,11 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   expect(app.enabled(refresh)).toBe(false);
   expect(app.enabled(disconnect)).toBe(false);
   await app.type(address, ${JSON.stringify(url)});
+  await app.waitUntil(() => app.enabled(connect));
   expect(app.enabled(connect)).toBe(true);
   await app.press(connect);
+  // Android touch dispatch can finish before the engine publishes the callback's frame.
+  await app.waitUntil(() => !app.enabled(address) && !app.enabled(connect));
   expect(app.enabled(address)).toBe(false);
   expect(app.enabled(connect)).toBe(false);
   await app.waitFor(project, { timeout: 20000 });
@@ -393,6 +396,8 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   await app.type(title, creation.defaultsTitle);
   await app.press(create);
   await app.waitFor("text:/^已创建 Agent：/", { timeout: 20000 });
+  const firstCompletion = app.texts().find((value) => value.startsWith("已创建 Agent："));
+  expect(typeof firstCompletion).toBe("string");
   expect(app.enabled("role:button[查询创建结果]")).toBe(false);
   expect(app.storage()[creation.storageKey]).toBe(undefined);
   await app.press("role:button[刷新Agent]");
@@ -401,11 +406,15 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   await app.clear(title);
   await app.type(title, creation.explicitTitle);
   await app.press(creation.modelButton);
+  await app.waitFor(creation.selectedModel);
   await app.press(creation.modeButton);
+  await app.waitFor(creation.selectedMode);
   expect(app.shows(creation.selectedModel)).toBe(true);
   expect(app.shows(creation.selectedMode)).toBe(true);
   await app.press(create);
+  await app.waitUntil(() => !app.shows("text:" + firstCompletion));
   await app.waitFor("text:/^已创建 Agent：/", { timeout: 20000 });
+  expect(app.texts().find((value) => value.startsWith("已创建 Agent：")) === firstCompletion).toBe(false);
   expect(app.enabled("role:button[查询创建结果]")).toBe(false);
   expect(app.storage()[creation.storageKey]).toBe(undefined);
   await app.press("role:button[刷新Agent]");
@@ -443,6 +452,7 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   expect(app.enabled(disconnect)).toBe(false);
 
   await app.press(connect);
+  await app.waitUntil(() => !app.enabled(address) && !app.enabled(connect));
   expect(app.enabled(address)).toBe(false);
   await app.waitFor(project, { timeout: 20000 });
   await app.waitFor(connected);
