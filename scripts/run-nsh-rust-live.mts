@@ -329,6 +329,8 @@ try {
     );
   } else {
     if (target === "android") reverse = await androidReverse(daemon.port);
+    const failureScreenshot = path.join(appDirectory, ".nsh", "evidence", `project-connect-${target}-${randomUUID()}.png`);
+    await mkdir(path.dirname(failureScreenshot), { recursive: true });
     await writeFile(
       testFile,
       `import { expect, open, test } from "nsh/test";
@@ -354,7 +356,13 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   expect(app.enabled(connect)).toBe(true);
   await app.press(connect);
   // Android touch dispatch can finish before the engine publishes the callback's frame.
-  await app.waitUntil(() => !app.enabled(address) && !app.enabled(connect));
+  try {
+    await app.waitUntil(() => !app.enabled(address) && !app.enabled(connect));
+  } catch (error) {
+    await app.screenshot(${JSON.stringify(failureScreenshot)});
+    console.log("Connection failure screenshot: " + ${JSON.stringify(failureScreenshot)});
+    throw error;
+  }
   expect(app.enabled(address)).toBe(false);
   expect(app.enabled(connect)).toBe(false);
   await app.waitFor(project, { timeout: 20000 });
