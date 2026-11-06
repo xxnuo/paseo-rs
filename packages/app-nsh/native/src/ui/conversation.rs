@@ -12,7 +12,10 @@ use crate::{
         timeline::{Action, FetchPlan, Row, Status, Timeline},
     },
 };
-use nsh_base::{MarkdownOptions, TextViewLinks, button, input, nav_page, text_view, theme};
+use nsh_base::{
+    MarkdownOptions, TextViewLinkPressEvent, TextViewLinks, button, input, nav_page, text_view,
+    theme,
+};
 use nsh_core::{element::Screen, prelude::*, storage::Storage};
 use std::{
     cell::{Cell, RefCell},
@@ -184,6 +187,20 @@ struct Conversation {
 }
 
 impl Conversation {
+    fn open_link(self: &Rc<Self>, url: String) {
+        if !external_http_url(&url) {
+            return;
+        }
+        let state = self.clone();
+        self.job(async move {
+            if !open_url(url).await && state.active.get() {
+                state
+                    .notice
+                    .set("无法打开链接，请检查默认浏览器设置".into());
+            }
+        });
+    }
+
     fn current(&self, generation: u64) -> bool {
         self.active.get() && self.timeline.borrow().generation == generation
     }
@@ -821,6 +838,10 @@ fn history_options(plan: FetchPlan, whole_turns: bool) -> HistoryOptions {
     }
 }
 
+fn external_http_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
 pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) -> Screen {
     let storage_key = format!(
         "paseo.nsh.composer:{}",
@@ -909,11 +930,14 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
             .child(virtual_list(move || rows.with(Vec::len), move |at| {
                 let row = computed(move || rows.with(|rows| rows.get(at.index()).cloned()));
                 let retry = retry.clone();
+                let links = retry.clone();
                 view().p_3().gap_2()
                     .child(text(move || row.with(|row| row.as_ref().map(DisplayRow::label).unwrap_or_default())).text_color(move || theme().muted_foreground))
                     .child(text_view().markdown(move || row.with(|row| row.as_ref().map(|row| SharedString::from(row.body()))))
                         .options(move || MarkdownOptions { streaming: row.with(|row| matches!(row, Some(DisplayRow::History(row)) if row.active)), ..Default::default() })
-                        .selectable(true).links(TextViewLinks::Open).text_color(move || theme().foreground))
+                        .selectable(true).links(TextViewLinks::Report)
+                        .on_link_press(move |event: &TextViewLinkPressEvent| links.open_link(event.url.to_string()))
+                        .text_color(move || theme().foreground))
                     .child(text(move || row.with(|row| match row {
                         Some(DisplayRow::Pending(message)) => message.error.clone().unwrap_or_default(),
                         _ => String::new(),
@@ -1006,5 +1030,21 @@ mod tests {
         assert_eq!(wire["message"]["projection"], "projected");
         assert!(wire["message"].get("wholeTurns").is_none());
         assert_eq!(options.limit, Some(50));
+    }
+
+    #[test]
+    fn message_links_keep_the_upstream_http_only_opener_boundary() {
+        assert!(external_http_url("https://example.com/path"));
+        assert!(external_http_url("http://localhost:6767"));
+        for value in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "paseo://open",
+            "mailto:a@example.com",
+            "#heading",
+            "/workspace/file",
+        ] {
+            assert!(!external_http_url(value));
+        }
     }
 }
