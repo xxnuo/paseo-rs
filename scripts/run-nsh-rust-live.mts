@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createPaseoClient } from "@getpaseo/client";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { createTestPaseoDaemon } from "../packages/server/src/server/test-utils/paseo-daemon.js";
 import { createTestAgentClients } from "../packages/server/src/server/test-utils/fake-agent-client.js";
 import { getHostName } from "../packages/server/src/server/host-name.js";
@@ -239,6 +240,20 @@ try {
   assert.deepEqual(features.features, [
     { type: "toggle", id: "fixture_cwd", label: `Fixture cwd: ${worktreeCwd}`, value: true },
   ]);
+  const explicitModel = provider.models.find((model) => model.isSelectable !== false);
+  const explicitMode = provider.modes.find((mode) => mode.id !== provider.defaultModeId);
+  assert(explicitModel && explicitMode, "The fake provider must offer explicit selectable options");
+  const uiCreation = {
+    defaultsTitle: "NSH_UI_DEFAULTS",
+    explicitTitle: "NSH_UI_EXPLICIT",
+    storageKey: `paseo.nsh.creation:${JSON.stringify([daemon.daemon.getServerId(), workspace.id, provider.provider])}`,
+    model: explicitModel.id,
+    mode: explicitMode.id,
+    modelButton: `role:button[模型：${explicitModel.label}]`,
+    selectedModel: `role:button[模型：${explicitModel.label}（已选择）]`,
+    modeButton: `role:button[模式：${explicitMode.label}]`,
+    selectedMode: `role:button[模式：${explicitMode.label}（已选择）]`,
+  };
   const directoryOracle = {
     workspace: `role:button[工作区：${workspace.name} · 空闲]`,
     provider: `role:button[服务商：${provider.label ?? provider.provider} · 可用]`,
@@ -250,10 +265,53 @@ try {
     workspaces: `text:已加载 ${workspaces.entries.length} 个工作区`,
     agents: `text:已加载 ${agents.entries.length} 个Agent`,
   };
-  await seed.close();
-  seed = undefined;
   console.log("Rust UI fixture: real loopback daemon and SDK seed, fake Codex provider (no model)");
   if (command === "--fixture-only") {
+    // The public SDK requires provider/model, so use its shipped low-level driver to omit model/mode.
+    const driver = new DaemonClient({
+      url,
+      clientId: `nsh-creation-oracle-${randomUUID()}`,
+      clientType: "cli",
+      appVersion: "0.15.2",
+      reconnect: { enabled: false },
+    });
+    try {
+      await driver.connect();
+      const defaults = {
+        config: { provider: provider.provider, cwd: worktreeCwd, title: "NSH_ORACLE_DEFAULTS" },
+        workspaceId: workspace.id,
+        idempotencyKey: randomUUID(),
+      };
+      assert.equal(Object.hasOwn(defaults.config, "model"), false);
+      assert.equal(Object.hasOwn(defaults.config, "modeId"), false);
+      const created = await driver.createAgent(defaults);
+      const repeated = await driver.createAgent(defaults);
+      assert.equal(
+        repeated.id,
+        created.id,
+        "Reusing a confirmed key must not create another Agent",
+      );
+      assert.equal(created.cwd, worktreeCwd);
+      assert.equal(created.workspaceId, workspace.id);
+      const explicit = await driver.createAgent({
+        config: {
+          ...defaults.config,
+          title: "NSH_ORACLE_EXPLICIT",
+          model: uiCreation.model,
+          modeId: uiCreation.mode,
+        },
+        workspaceId: workspace.id,
+        idempotencyKey: randomUUID(),
+      });
+      assert.equal(explicit.cwd, worktreeCwd);
+      assert.equal(explicit.workspaceId, workspace.id);
+      assert.equal(explicit.model, uiCreation.model);
+      assert.equal(explicit.currentModeId, uiCreation.mode);
+      const after = await seed.agents.list({ filter: { projectKeys: [project.projectId] } });
+      assert.equal(after.entries.length, agents.entries.length + 2);
+    } finally {
+      await driver.close();
+    }
     console.log(
       JSON.stringify({
         projectDisplayName: project.projectDisplayName,
@@ -262,6 +320,8 @@ try {
         worktreeDiffersFromProjectRoot: true,
         provider: provider.provider,
         featureContextVerified: true,
+        defaultAndExplicitCreationVerified: true,
+        sameKeyDeduplicated: true,
         fixture: "ready",
         rustUiExecuted: false,
       }),
@@ -283,6 +343,7 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   const directory = ${JSON.stringify(directoryOracle)};
   const projectPage = ${JSON.stringify(`text:项目：${project.projectDisplayName}`)};
   const projectButton = ${JSON.stringify(`role:button[${project.projectDisplayName}]`)};
+  const creation = ${JSON.stringify(uiCreation)};
   await app.waitFor("连接开发主机");
   expect(app.enabled(connect)).toBe(false);
   expect(app.enabled(refresh)).toBe(false);
@@ -323,6 +384,31 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   await app.waitFor(directory.features, { timeout: 15000 });
   await app.press("role:button[刷新服务商功能]");
   await app.waitFor(directory.features, { timeout: 15000 });
+  const create = "role:button[创建 Agent]";
+  const title = "label:Agent 名称（可选）";
+  await app.waitFor("role:button[模型：服务商默认（已选择）]");
+  await app.waitFor("role:button[模式：服务商默认（已选择）]");
+  expect(app.enabled(create)).toBe(true);
+  await app.type(title, creation.defaultsTitle);
+  await app.press(create);
+  await app.waitFor("text:/^已创建 Agent：/", { timeout: 20000 });
+  expect(app.enabled("role:button[查询创建结果]")).toBe(false);
+  expect(app.storage()[creation.storageKey]).toBe(undefined);
+  await app.press("role:button[刷新Agent]");
+  await app.waitFor("role:button[Agent：" + creation.defaultsTitle + " · 空闲]", { timeout: 15000 });
+
+  await app.clear(title);
+  await app.type(title, creation.explicitTitle);
+  await app.press(creation.modelButton);
+  await app.press(creation.modeButton);
+  expect(app.shows(creation.selectedModel)).toBe(true);
+  expect(app.shows(creation.selectedMode)).toBe(true);
+  await app.press(create);
+  await app.waitFor("text:/^已创建 Agent：/", { timeout: 20000 });
+  expect(app.enabled("role:button[查询创建结果]")).toBe(false);
+  expect(app.storage()[creation.storageKey]).toBe(undefined);
+  await app.press("role:button[刷新Agent]");
+  await app.waitFor("role:button[Agent：" + creation.explicitTitle + " · 空闲]", { timeout: 15000 });
   await app.press(directory.agent);
   await app.waitFor(directory.detail, { timeout: 15000 });
   await app.press("role:button[刷新 Agent 详情]");
@@ -336,7 +422,7 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   await app.press(projectButton);
   await app.waitFor(projectPage);
   await app.waitFor(directory.workspaces, { timeout: 15000 });
-  await app.waitFor(directory.agents, { timeout: 15000 });
+  await app.waitFor(${JSON.stringify(`text:已加载 ${agents.entries.length + 2} 个Agent`)}, { timeout: 15000 });
   await app.press(directory.workspace);
   await app.waitFor(directory.cwd);
   await app.waitFor(directory.provider, { timeout: 15000 });
@@ -390,6 +476,29 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
         else reject(new Error(`Rust UI verification exited with ${signal ?? code}`));
       });
     });
+    const after = await seed.agents.list({ filter: { projectKeys: [project.projectId] } });
+    assert.equal(after.pageInfo.hasMore, false);
+    assert.equal(
+      after.entries.length,
+      agents.entries.length + 2,
+      "UI must create exactly two Agents",
+    );
+    for (const title of [uiCreation.defaultsTitle, uiCreation.explicitTitle]) {
+      const matches = after.entries.filter((entry) => entry.agent.title === title);
+      assert.equal(matches.length, 1, `UI-created title must be unique: ${title}`);
+      const actual = (await seed.agents.ref(matches[0].agent.id).refresh())?.agent;
+      assert(actual, "UI-created Agent must have a real daemon detail");
+      assert.equal(actual.cwd, worktreeCwd);
+      assert.equal(actual.workspaceId, workspace.id);
+      assert.equal(actual.provider, provider.provider);
+      if (title === uiCreation.explicitTitle) {
+        assert.equal(actual.model, uiCreation.model);
+        assert.equal(actual.currentModeId, uiCreation.mode);
+      }
+    }
+    console.log(
+      "Rust UI creation verified by SDK: two unique worktree Agents, defaults and explicit options",
+    );
   }
 } finally {
   const closing = await Promise.allSettled([
