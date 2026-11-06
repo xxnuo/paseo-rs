@@ -137,14 +137,43 @@ let seed: ReturnType<typeof createPaseoClient> | undefined;
 let reverse: AndroidReverse | undefined;
 try {
   const cwd = path.join(scratch, "NSH_RUST_FIXTURE");
+  const worktreeCwd = path.join(scratch, "NSH_RUST_WORKTREE");
   await mkdir(cwd);
+  const git = promisify(execFile);
+  const gitOptions = { cwd, timeout: 10_000 };
+  await git("git", ["init", "--initial-branch=main"], gitOptions);
+  await git(
+    "git",
+    [
+      "-c",
+      "user.name=NSH fixture",
+      "-c",
+      "user.email=nsh-fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "Temporary NSH directory fixture",
+    ],
+    gitOptions,
+  );
+  await git("git", ["worktree", "add", "--detach", worktreeCwd, "HEAD"], gitOptions);
+  const agentClients = createTestAgentClients();
+  // Deliberate fake catalog marker: proves the Rust draft RPC used the selected worktree cwd.
+  // This is fixture metadata only, and never sends a prompt or invokes a model.
+  agentClients.codex.listFeatures = async (config) => [
+    { type: "toggle", id: "fixture_cwd", label: `Fixture cwd: ${config.cwd}`, value: true },
+  ];
   daemon = await createTestPaseoDaemon({
     paseoHomeRoot: path.join(scratch, "daemon"),
     staticDir: path.join(scratch, "static"),
     cleanup: false,
     mcpEnabled: false,
     pluginsEnabled: false,
-    agentClients: createTestAgentClients(),
+    agentClients,
   });
   const url = `ws://127.0.0.1:${daemon.port}/ws`;
   seed = createPaseoClient({
@@ -164,12 +193,78 @@ try {
   const project = listing.projects.find((entry) => entry.projectRootPath === cwd);
   assert(project, "The real SDK must observe the seeded project before running Rust UI");
   assert.equal(project.projectDisplayName, "NSH_RUST_FIXTURE");
+  const worktree = await seed.workspaces.create({
+    source: { kind: "directory", path: worktreeCwd, projectId: project.projectId },
+  });
+  const worktreeAgent = await worktree.agents.create({
+    config: { provider: "codex/gpt-5.4-mini", modeId: "full-access" },
+    title: "Rust worktree fixture (fake provider, no model)",
+  });
+  const workspaces = await seed.workspaces.list({
+    filter: { projectId: project.projectId },
+    page: { limit: 50 },
+  });
+  assert.equal(workspaces.pageInfo.hasMore, false);
+  const workspace = workspaces.entries.find((entry) => entry.workspaceDirectory === worktreeCwd);
+  assert(workspace, "The SDK must discover the actual worktree workspace");
+  assert.notEqual(workspace.workspaceDirectory, workspace.projectRootPath);
+  assert.equal(workspace.status, "done");
+  assert.equal(workspace.projectId, project.projectId);
+  const agents = await seed.agents.list({
+    // The agent wire field projectKeys matches projectId, not project.list.projectKey.
+    filter: { projectKeys: [project.projectId] },
+    page: { limit: 50 },
+  });
+  assert.equal(agents.pageInfo.hasMore, false);
+  const agentEntry = agents.entries.find((entry) => entry.agent.id === worktreeAgent.id);
+  assert(agentEntry, "The SDK must discover the seeded Agent within the project directory");
+  assert.equal(agentEntry.project.projectKey, project.projectId);
+  const detail = (await worktreeAgent.refresh())?.agent;
+  assert(detail, "The SDK must read the seeded Agent detail");
+  assert.equal(detail.cwd, worktreeCwd);
+  assert.equal(detail.status, "idle");
+  const providers = await seed.providers.waitForReady({ cwd: worktreeCwd, timeoutMs: 15_000 });
+  const provider = providers.entries.find((entry) => entry.provider === detail.provider);
+  assert(provider && provider.enabled && provider.status === "ready");
+  assert(
+    provider.models?.length && provider.modes?.length,
+    "Fake catalog must have real wire rows",
+  );
+  assert(detail.model, "The fake Agent must expose its selected model");
+  const features = await seed.providers.listFeatures({
+    provider: `${provider.provider}/${detail.model}`,
+    cwd: worktreeCwd,
+  });
+  assert.equal(features.error, null);
+  assert.deepEqual(features.features, [
+    { type: "toggle", id: "fixture_cwd", label: `Fixture cwd: ${worktreeCwd}`, value: true },
+  ]);
+  const directoryOracle = {
+    workspace: `role:button[工作区：${workspace.name} · 空闲]`,
+    provider: `role:button[服务商：${provider.label ?? provider.provider} · 可用]`,
+    cwd: `text:服务商目录：${worktreeCwd}`,
+    catalog: `text:服务商 ID：${provider.provider}\n模型\n${provider.models.map((model) => `${model.label}（${model.id}）`).join("\n")}\n模式\n${provider.modes.map((mode) => `${mode.label}（${mode.id}）`).join("\n")}`,
+    features: `text:Fixture cwd: ${worktreeCwd}：开启`,
+    agent: `role:button[Agent：${agentEntry.agent.title ?? agentEntry.agent.id} · 空闲]`,
+    detail: `text:Agent ID：${detail.id}\n服务商：${detail.provider}\n模型：${detail.model ?? "未指定"}\n模式：${detail.currentModeId ?? "未指定"}\n状态：空闲\n工作目录：${detail.cwd}`,
+    workspaces: `text:已加载 ${workspaces.entries.length} 个工作区`,
+    agents: `text:已加载 ${agents.entries.length} 个Agent`,
+  };
   await seed.close();
   seed = undefined;
   console.log("Rust UI fixture: real loopback daemon and SDK seed, fake Codex provider (no model)");
   if (command === "--fixture-only") {
     console.log(
-      JSON.stringify({ projectDisplayName: project.projectDisplayName, fixture: "ready" }),
+      JSON.stringify({
+        projectDisplayName: project.projectDisplayName,
+        workspaces: workspaces.entries.length,
+        agents: agents.entries.length,
+        worktreeDiffersFromProjectRoot: true,
+        provider: provider.provider,
+        featureContextVerified: true,
+        fixture: "ready",
+        rustUiExecuted: false,
+      }),
     );
   } else {
     if (target === "android") reverse = await androidReverse(daemon.port);
@@ -177,7 +272,7 @@ try {
       testFile,
       `import { expect, open, test } from "nsh/test";
 
-test("Rust root connects, lists, refreshes, disconnects and reconnects to the real daemon", async () => {
+test("Rust project directory browses real workspace, provider and Agent RPCs without model inference", async () => {
   const app = await open("..", { network: "live" });
   const project = ${JSON.stringify(`text:${project.projectDisplayName}`)};
   const connected = ${JSON.stringify(`text:已连接：${getHostName()}`)};
@@ -185,6 +280,9 @@ test("Rust root connects, lists, refreshes, disconnects and reconnects to the re
   const connect = "role:button[连接主机]";
   const refresh = "role:button[刷新项目]";
   const disconnect = "role:button[断开连接]";
+  const directory = ${JSON.stringify(directoryOracle)};
+  const projectPage = ${JSON.stringify(`text:项目：${project.projectDisplayName}`)};
+  const projectButton = ${JSON.stringify(`role:button[${project.projectDisplayName}]`)};
   await app.waitFor("连接开发主机");
   expect(app.enabled(connect)).toBe(false);
   expect(app.enabled(refresh)).toBe(false);
@@ -206,9 +304,52 @@ test("Rust root connects, lists, refreshes, disconnects and reconnects to the re
   await app.waitFor(connected, { timeout: 15000 });
   expect(app.shows(project)).toBe(true);
   expect(app.enabled(refresh)).toBe(true);
+
+  await app.press(projectButton);
+  await app.waitFor(projectPage);
+  await app.waitFor(directory.workspaces, { timeout: 15000 });
+  await app.waitFor(directory.agents, { timeout: 15000 });
+  expect(app.enabled("role:button[加载更多工作区]")).toBe(false);
+  expect(app.enabled("role:button[加载更多Agent]")).toBe(false);
+  await app.press("role:button[刷新工作区]");
+  await app.waitFor(directory.workspaces, { timeout: 15000 });
+  await app.press("role:button[刷新Agent]");
+  await app.waitFor(directory.agents, { timeout: 15000 });
+  await app.press(directory.workspace);
+  await app.waitFor(directory.cwd);
+  await app.waitFor(directory.provider, { timeout: 15000 });
+  await app.press(directory.provider);
+  await app.waitFor(directory.catalog);
+  await app.waitFor(directory.features, { timeout: 15000 });
+  await app.press("role:button[刷新服务商功能]");
+  await app.waitFor(directory.features, { timeout: 15000 });
+  await app.press(directory.agent);
+  await app.waitFor(directory.detail, { timeout: 15000 });
+  await app.press("role:button[刷新 Agent 详情]");
+  await app.waitFor(directory.detail, { timeout: 15000 });
+  await app.press("role:button[返回项目列表]");
+  await app.waitFor(connected);
+  expect(app.enabled(address)).toBe(false);
+  expect(app.enabled(connect)).toBe(false);
+  expect(app.storage()["paseo.nsh.client-id"]).toBe(clientId);
+  expect(app.shows(projectPage)).toBe(false);
+  await app.press(projectButton);
+  await app.waitFor(projectPage);
+  await app.waitFor(directory.workspaces, { timeout: 15000 });
+  await app.waitFor(directory.agents, { timeout: 15000 });
+  await app.press(directory.workspace);
+  await app.waitFor(directory.cwd);
+  await app.waitFor(directory.provider, { timeout: 15000 });
+  await app.press(directory.provider);
+  await app.waitFor(directory.features, { timeout: 15000 });
+  await app.press(directory.agent);
+  await app.waitFor(directory.detail, { timeout: 15000 });
   await app.press(disconnect);
   await app.waitFor("text:已断开连接");
   expect(app.shows(project)).toBe(false);
+  expect(app.shows(projectPage)).toBe(false);
+  expect(app.shows(directory.cwd)).toBe(false);
+  expect(app.shows(directory.detail)).toBe(false);
   expect(app.enabled(address)).toBe(true);
   expect(app.enabled(connect)).toBe(true);
   expect(app.enabled(refresh)).toBe(false);
@@ -222,7 +363,7 @@ test("Rust root connects, lists, refreshes, disconnects and reconnects to the re
   await app.press(disconnect);
   await app.waitFor("text:已断开连接");
   expect(app.shows(project)).toBe(false);
-}, 90000);
+}, 180000);
 `,
       { flag: "wx" },
     );
