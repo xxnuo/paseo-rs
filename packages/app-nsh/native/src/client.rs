@@ -11,7 +11,7 @@ use crate::protocol::conversation::{
 };
 use crate::protocol::{self, HelloRejection, ProjectList, ServerEvent, ServerInfo};
 use nsh_core::{
-    element::{Spawned, spawn, timer},
+    element::{Owner, Spawned, spawn, timer},
     websocket::{WebSocket, WebSocketData},
 };
 use std::{
@@ -115,6 +115,8 @@ impl From<HelloRejection> for ClientError {
 
 // No Debug: the socket and future protocol fields can carry credentials.
 pub(crate) struct Client {
+    owner: Owner,
+    releases: RefCell<Vec<Spawned<()>>>,
     socket: Rc<WebSocket>,
     pending: Rc<PendingRequests>,
     reader: Option<Spawned<()>>,
@@ -159,6 +161,8 @@ impl Client {
                         }
                     });
                     return Ok(Self {
+                        owner: Owner::current(),
+                        releases: RefCell::new(Vec::new()),
                         socket,
                         pending,
                         reader: Some(reader),
@@ -373,6 +377,33 @@ impl Client {
         }
     }
 
+    /// Page disposal stops local delivery immediately; the connection owns the bounded release RPC.
+    pub(crate) fn release_after_page(&self, subscription_id: String) {
+        self.pending.events.release_token(&subscription_id);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        self.releases
+            .borrow_mut()
+            .retain_mut(|task| std::pin::Pin::new(task).poll(&mut context).is_pending());
+        let socket = self.socket.clone();
+        let pending = self.pending.clone();
+        let on_state = self.on_state.clone();
+        let task = self.owner.run(|| {
+            spawn(async move {
+                let id = uuid::Uuid::new_v4().to_string();
+                let _ = request_on(
+                    &socket,
+                    &pending,
+                    &on_state,
+                    ReplyKind::SubscriptionReleased,
+                    &id,
+                    conversation::release_subscription(&id, &subscription_id),
+                )
+                .await;
+            })
+        });
+        self.releases.borrow_mut().push(task);
+    }
+
     pub(crate) async fn fetch_timeline(
         &self,
         agent_id: &str,
@@ -515,18 +546,37 @@ impl Client {
         request_id: &str,
         wire: String,
     ) -> Result<PendingReply, ClientError> {
-        let (guard, reply) = self.pending.register(request_id.to_owned(), expected)?;
-        let result = with_timeout(async {
-            if self.socket.write(WebSocketData::Text(wire)).await.is_err() {
-                fail_connection(&self.pending, &self.on_state, ClientError::Transport);
-                return Err(ClientError::Transport);
-            }
-            reply.await
-        })
-        .await;
-        drop(guard);
-        result
+        request_on(
+            &self.socket,
+            &self.pending,
+            &self.on_state,
+            expected,
+            request_id,
+            wire,
+        )
+        .await
     }
+}
+
+async fn request_on(
+    socket: &WebSocket,
+    pending: &Rc<PendingRequests>,
+    on_state: &Rc<dyn Fn(ClientError)>,
+    expected: ReplyKind,
+    request_id: &str,
+    wire: String,
+) -> Result<PendingReply, ClientError> {
+    let (guard, reply) = pending.register(request_id.to_owned(), expected)?;
+    let result = with_timeout(async {
+        if socket.write(WebSocketData::Text(wire)).await.is_err() {
+            fail_connection(pending, on_state, ClientError::Transport);
+            return Err(ClientError::Transport);
+        }
+        reply.await
+    })
+    .await;
+    drop(guard);
+    result
 }
 
 impl Drop for Client {
