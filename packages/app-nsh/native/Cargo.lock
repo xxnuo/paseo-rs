@@ -1063,6 +1063,8 @@ dependencies = [
  "nsh-core",
  "nsh-engine",
  "nsh-testing",
+ "serde",
+ "serde_json",
  "url",
 ]
 

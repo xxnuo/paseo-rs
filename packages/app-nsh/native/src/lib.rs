@@ -1,6 +1,8 @@
 //! Rust-first Paseo client. Shared protocol probes live outside the product UI.
 
 mod host;
+#[cfg(test)]
+mod protocol;
 
 use nsh_base::{button, input, nav_page, nav_stack, theme};
 use nsh_core::prelude::*;
