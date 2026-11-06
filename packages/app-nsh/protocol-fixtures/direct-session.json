@@ -1,0 +1,237 @@
+[
+  {
+    "direction": "client",
+    "frame": {
+      "type": "hello",
+      "clientId": "fixture-client",
+      "clientType": "cli",
+      "protocolVersion": 1,
+      "capabilities": {
+        "terminal_chunked_replay": true,
+        "binary_chunking_v1": true,
+        "hello_rejection": true,
+        "owned_subscriptions": true,
+        "all_providers": true,
+        "selective_agent_timeline": true,
+        "reasoning_merge_enum": true,
+        "custom_mode_icons": true,
+        "terminal_reflowable_snapshot": true,
+        "provider_subagents": true,
+        "projected_subagent_timeline": true,
+        "project_updates": true,
+        "compact_provider_snapshots": true,
+        "provider_snapshot_references": true,
+        "timeline_replacement_invalidation": true,
+        "timeline_notifications": true,
+        "plugin_timeline_items": true,
+        "workspace_setup_blocked": true,
+        "workspace_setup_observation": true,
+        "plugin_binary_payloads": true,
+        "background_agents": true,
+        "explicit_event_subscriptions": true
+      },
+      "appVersion": "0.15.2"
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "status",
+        "payload": {
+          "status": "server_info",
+          "protocolVersion": 1,
+          "serverId": "fixture-server",
+          "hostname": "fixture-host",
+          "version": "0.15.2",
+          "sourceId": "fixture-source",
+          "permissions": [
+            "daemon.read",
+            "daemon.manage",
+            "tunnel.manage",
+            "access.manage",
+            "workspace.read",
+            "workspace.write",
+            "workspace.manage",
+            "automation.manage",
+            "hub.execute"
+          ],
+          "desktopManaged": false,
+          "capabilities": {
+            "voice": {
+              "dictation": {
+                "enabled": true,
+                "reason": "Dictation is unavailable: speech-to-text service is not ready."
+              },
+              "voice": {
+                "enabled": true,
+                "reason": "Realtime voice is unavailable: turn-detection service is not ready."
+              }
+            }
+          },
+          "features": {
+            "connectedHosts": true,
+            "hostMultiplexing": true,
+            "relayProtectedSecurity": true,
+            "usageSetting": true,
+            "usageSources": true,
+            "ownedSubscriptions": true,
+            "binaryChunkingV1": true,
+            "agentRequestReceipts": true,
+            "workspaceRequestReceipts": true,
+            "creationLifecycle": true,
+            "hubAgentRpc": true,
+            "backgroundWorkspaces": true,
+            "backgroundAgents": true,
+            "workspaceBaseBranch": true,
+            "directorySync": true,
+            "workspaceLabels": true,
+            "workspaceSetupRun": true,
+            "workspaceSetupObservation": true,
+            "workspaceSortTimes": true,
+            "providersSnapshot": true,
+            "providersSnapshotCwd": true,
+            "checkoutForgeSetAutoMerge": true,
+            "checkoutGithubSetAutoMerge": true,
+            "githubCheckDetails": true,
+            "forgeCheckDetails": true,
+            "forgeSearch": true,
+            "daemonStatusRpc": true,
+            "daemonConfigReload": true,
+            "speechSettings": true,
+            "relayConfig": true,
+            "pushTokenRevocation": true,
+            "plugins": true,
+            "pluginManagement": true,
+            "pluginGitManagement": true,
+            "pluginSourceInstallation": true,
+            "pluginSourceUpdates": true,
+            "pluginLogs": true,
+            "pluginThemes": true,
+            "pluginSettings": true,
+            "pluginTimelineItems": true,
+            "pluginSubscriptions": true,
+            "skillManagement": true,
+            "idleRuntimeCleanupSetting": true,
+            "resumeOnStartupSetting": true,
+            "terminal-restore-modes": true,
+            "terminal-input-mode-replay": true,
+            "terminal-size-ownership": true,
+            "terminal-grapheme-widths": true,
+            "workspaceTerminals": true,
+            "rewind": true,
+            "agentTimelinePromptIndex": true,
+            "agentHistorySearch": true,
+            "checkoutRefresh": true,
+            "workspaceMultiplicity": true,
+            "projectRemove": true,
+            "projectAdd": true,
+            "projectList": true,
+            "projectSuggestions": true,
+            "worktreeRestore": true,
+            "workspaceRecovery": true,
+            "workspaceFileEditing": true,
+            "fileByteWrites": true,
+            "providerUsageList": true,
+            "agentDetach": true,
+            "agentThinkingUpdate": true,
+            "daemonDiagnostics": true,
+            "daemonSelfUpdate": true,
+            "terminalsSurviveRestart": true,
+            "agentForkContext": true,
+            "agentForkContextCursor": true,
+            "providerSubagents": true,
+            "projectedSubagentTimeline": true,
+            "wholeTurnTimeline": true,
+            "providerSubagentNesting": true,
+            "workspacePinning": true,
+            "workspaceMarkUnread": true,
+            "hubRelationship": true,
+            "projectGithubClone": true,
+            "workspaceGithubRepositorySearch": true,
+            "projectCreateDirectory": true,
+            "commitsList": true,
+            "commitBaseClassification": true,
+            "providerRemoval": true,
+            "hopliteProvider": false,
+            "importSessionWorkspaceTarget": true,
+            "importSessionSearch": true,
+            "forgeProviders": true,
+            "selectiveAgentTimeline": true,
+            "explicitEventSubscriptions": true,
+            "canonicalSubmittedPrompts": true,
+            "agentMessageProvenance": true,
+            "agentMessageBatching": true,
+            "stableProjectIdentity": true,
+            "workspaceScriptManagement": true,
+            "projectCustomIcon": true,
+            "fsEntryOps": true,
+            "fsEntryDuplicate": true,
+            "checkoutDiscardChanges": true,
+            "checkoutDiffAll": true,
+            "agentProfiles": true,
+            "agentConfigApply": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "project.list.request",
+        "requestId": "projects-empty"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "project.list.response",
+        "payload": {
+          "requestId": "projects-empty",
+          "projects": []
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "project.list.request",
+        "requestId": "projects-populated"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "project.list.response",
+        "payload": {
+          "requestId": "projects-populated",
+          "projects": [
+            {
+              "projectId": "fixture-project",
+              "projectKey": "fixture-project-key",
+              "projectDisplayName": "project",
+              "projectCustomName": null,
+              "projectCustomIconRevision": null,
+              "projectIconRevision": "automatic:none:v1",
+              "projectRootPath": "/fixture/project",
+              "projectKind": "non_git"
+            }
+          ]
+        }
+      }
+    }
+  }
+]
