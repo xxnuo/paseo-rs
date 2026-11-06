@@ -1,0 +1,443 @@
+[
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "turn_started",
+            "provider": "codex",
+            "turnId": "fixture-turn"
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "user_message",
+              "text": "echo hello; Respond with exactly: FIXTURE_REPLY_中文",
+              "messageId": "fixture-identity",
+              "clientMessageId": "fixture-identity"
+            },
+            "turnId": "fixture-turn"
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "seq": 1,
+          "epoch": "fixture-epoch",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "thread_started",
+            "sessionId": "fixture-session",
+            "provider": "codex"
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "tool_call",
+              "callId": "fixture-call",
+              "name": "shell",
+              "detail": {
+                "type": "unknown",
+                "input": {
+                  "command": "echo hello"
+                },
+                "output": null
+              },
+              "status": "running",
+              "error": null
+            },
+            "turnId": "fixture-turn"
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "seq": 2,
+          "epoch": "fixture-epoch",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "permission_requested",
+            "provider": "codex",
+            "request": {
+              "id": "fixture-permission",
+              "provider": "codex",
+              "name": "shell",
+              "kind": "tool",
+              "title": "Permission required",
+              "description": "Test permission request",
+              "input": {
+                "command": "echo hello"
+              }
+            }
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "tool_call",
+              "callId": "fixture-call",
+              "name": "shell",
+              "detail": {
+                "type": "unknown",
+                "input": {
+                  "command": "echo hello"
+                },
+                "output": {
+                  "stdout": "hello\n"
+                }
+              },
+              "status": "completed",
+              "error": null
+            },
+            "turnId": "fixture-turn"
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "seq": 3,
+          "epoch": "fixture-epoch",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "permission_resolved",
+            "provider": "codex",
+            "requestId": "fixture-permission",
+            "resolution": {
+              "behavior": "allow"
+            }
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "assistant_message",
+              "text": "FIXTURE_REPLY_中文"
+            },
+            "turnId": "fixture-turn"
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "seq": 4,
+          "epoch": "fixture-epoch",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "fixture-agent",
+          "event": {
+            "type": "turn_completed",
+            "provider": "codex",
+            "turnId": "fixture-turn",
+            "usage": {
+              "inputTokens": 1,
+              "outputTokens": 1
+            }
+          },
+          "timestamp": "2026-11-06T00:00:00.000Z",
+          "subscriptionId": "fixture-subscription"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agent_timeline_request",
+        "agentId": "fixture-agent",
+        "requestId": "fixture-history",
+        "direction": "tail",
+        "limit": 100
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agent_timeline_response",
+        "payload": {
+          "requestId": "fixture-history",
+          "agentId": "fixture-agent",
+          "agent": {
+            "id": "fixture-agent",
+            "provider": "codex",
+            "cwd": "/fixture/project",
+            "workspaceId": "fixture-workspace",
+            "model": "gpt-5.4-mini",
+            "thinkingOptionId": null,
+            "effectiveThinkingOptionId": null,
+            "runtimeInfo": {
+              "provider": "codex",
+              "sessionId": "fixture-session",
+              "model": "gpt-5.4-mini",
+              "modeId": "default"
+            },
+            "createdAt": "2026-11-06T00:00:00.000Z",
+            "updatedAt": "2026-11-06T00:00:00.000Z",
+            "lastUserMessageAt": "2026-11-06T00:00:00.000Z",
+            "status": "idle",
+            "activeTurn": null,
+            "capabilities": {
+              "supportsStreaming": true,
+              "supportsSessionPersistence": true,
+              "supportsDynamicModes": true,
+              "supportsMcpServers": false,
+              "supportsReasoningStream": true,
+              "supportsToolInvocations": true,
+              "supportsRewindConversation": false,
+              "supportsRewindFiles": false,
+              "supportsRewindBoth": false
+            },
+            "currentModeId": "default",
+            "availableModes": [
+              {
+                "id": "bypassPermissions",
+                "label": "Bypass",
+                "description": "No permissions"
+              },
+              {
+                "id": "default",
+                "label": "Default",
+                "description": "Ask for permissions"
+              },
+              {
+                "id": "full-access",
+                "label": "Full access",
+                "description": "No prompts"
+              },
+              {
+                "id": "auto",
+                "label": "Auto",
+                "description": "Ask/allow based on policy"
+              },
+              {
+                "id": "always-ask",
+                "label": "Always Ask",
+                "description": "Always prompt"
+              }
+            ],
+            "features": [
+              {
+                "type": "toggle",
+                "id": "test_feature",
+                "label": "Test feature",
+                "description": "Deterministic provider feature used by MCP integration tests.",
+                "value": false
+              }
+            ],
+            "pendingPermissions": [],
+            "persistence": {
+              "provider": "codex",
+              "sessionId": "fixture-session",
+              "metadata": {
+                "conversationId": "fixture-identity",
+                "cwd": "/fixture/project"
+              }
+            },
+            "title": "fixture-agent",
+            "labels": {},
+            "archivedAt": null,
+            "lastUsage": {
+              "inputTokens": 1,
+              "outputTokens": 1
+            },
+            "requiresAttention": true,
+            "attentionReason": "finished",
+            "attentionTimestamp": "2026-11-06T00:00:00.000Z"
+          },
+          "direction": "tail",
+          "projection": "projected",
+          "epoch": "fixture-epoch",
+          "reset": false,
+          "staleCursor": false,
+          "gap": false,
+          "window": {
+            "minSeq": 1,
+            "maxSeq": 4,
+            "nextSeq": 5
+          },
+          "startCursor": {
+            "epoch": "fixture-epoch",
+            "seq": 1
+          },
+          "endCursor": {
+            "epoch": "fixture-epoch",
+            "seq": 4
+          },
+          "hasOlder": false,
+          "hasNewer": false,
+          "entries": [
+            {
+              "provider": "codex",
+              "item": {
+                "type": "user_message",
+                "text": "echo hello; Respond with exactly: FIXTURE_REPLY_中文",
+                "clientMessageId": "fixture-identity",
+                "messageId": "fixture-identity"
+              },
+              "timestamp": "2026-11-06T00:00:00.000Z",
+              "seqStart": 1,
+              "seqEnd": 1,
+              "sourceSeqRanges": [
+                {
+                  "startSeq": 1,
+                  "endSeq": 1
+                }
+              ],
+              "turnId": "fixture-turn",
+              "collapsed": []
+            },
+            {
+              "provider": "codex",
+              "item": {
+                "type": "tool_call",
+                "name": "shell",
+                "callId": "fixture-call",
+                "status": "completed",
+                "detail": {
+                  "type": "unknown",
+                  "input": {
+                    "command": "echo hello"
+                  },
+                  "output": {
+                    "stdout": "hello\n"
+                  }
+                },
+                "error": null
+              },
+              "timestamp": "2026-11-06T00:00:00.000Z",
+              "seqStart": 2,
+              "seqEnd": 3,
+              "sourceSeqRanges": [
+                {
+                  "startSeq": 2,
+                  "endSeq": 3
+                }
+              ],
+              "turnId": "fixture-turn",
+              "collapsed": ["tool_lifecycle"]
+            },
+            {
+              "provider": "codex",
+              "item": {
+                "type": "assistant_message",
+                "text": "FIXTURE_REPLY_中文"
+              },
+              "timestamp": "2026-11-06T00:00:00.000Z",
+              "seqStart": 4,
+              "seqEnd": 4,
+              "sourceSeqRanges": [
+                {
+                  "startSeq": 4,
+                  "endSeq": 4
+                }
+              ],
+              "turnId": "fixture-turn",
+              "collapsed": []
+            }
+          ],
+          "error": null
+        }
+      }
+    }
+  }
+]
