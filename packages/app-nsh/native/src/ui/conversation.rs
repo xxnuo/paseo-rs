@@ -7,8 +7,7 @@ use crate::{
     protocol::{catalog::AgentStatus, conversation::*},
     state::{
         conversation::{
-            CancelStatus, ConversationState, PendingMessage, PendingPermission, PermissionStatus,
-            SendStatus,
+            CancelStatus, ConversationState, PendingMessage, PendingPermission, SendStatus,
         },
         timeline::{Action, FetchPlan, Row, Status, Timeline},
     },
