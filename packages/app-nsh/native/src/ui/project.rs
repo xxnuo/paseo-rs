@@ -232,6 +232,7 @@ pub(super) fn page(
     back: impl Fn() + 'static,
     disconnect: impl Fn() + 'static,
     open_agent: Rc<dyn Fn(String)>,
+    initial_open_agent: Option<String>,
 ) -> Screen {
     let title = project.project_display_name.clone();
     let state = Rc::new(ProjectPage {
@@ -394,7 +395,14 @@ pub(super) fn page(
                     .child(each(
                         move || agents.get(),
                         |entry: &Rc<AgentEntry>| entry.agent.id.clone(),
-                        move |entry, _| agent_row(agent_client.clone(), entry, open_agent.clone()),
+                        move |entry, _| {
+                            agent_row(
+                                agent_client.clone(),
+                                entry,
+                                open_agent.clone(),
+                                initial_open_agent.clone(),
+                            )
+                        },
                     )),
             ),
     )
@@ -424,8 +432,14 @@ fn agent_row(
     client: Rc<Client>,
     entry: ReadSignal<Rc<AgentEntry>>,
     open_agent: Rc<dyn Fn(String)>,
+    initial_open_agent: Option<String>,
 ) -> impl IntoElement {
-    let open = signal(Vec::<String>::new());
+    let open = signal(
+        initial_open_agent
+            .filter(|id| entry.with_untracked(|entry| entry.agent.id == *id))
+            .into_iter()
+            .collect::<Vec<_>>(),
+    );
     let detail_client = client.clone();
     view()
         .gap_2()

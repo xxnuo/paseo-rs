@@ -1039,12 +1039,21 @@ impl Timeline {
         let remaining = std::mem::take(&mut self.buffered);
         self.buffered_bytes = 0;
         let mut recovery = Recovery::None;
+        let mut replaying_previous_attachment = false;
         for buffered in remaining {
+            let old_attachment = buffered.arrival <= self.attachment_arrival;
+            if replaying_previous_attachment && !old_attachment {
+                self.freeze_live();
+            }
+            replaying_previous_attachment = old_attachment;
             match self.observe(buffered.event, buffered.arrival) {
                 Recovery::Tail => recovery = Recovery::Tail,
                 Recovery::After if recovery != Recovery::Tail => recovery = Recovery::After,
                 _ => {}
             }
+        }
+        if replaying_previous_attachment {
+            self.freeze_live();
         }
         if let Some(previous) = previous_rows {
             self.restore_row_ids(&previous);
@@ -1795,6 +1804,25 @@ mod tests {
             next.iter()
                 .all(|action| matches!(action, Action::Fetch { .. }))
         );
+    }
+
+    #[test]
+    fn old_provisional_replay_stays_frozen_after_an_empty_same_epoch_catch_up() {
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(timeline.generation, anonymous("old ", None));
+        timeline.stream(timeline.generation, anonymous("answer", None));
+        timeline.detach();
+        let after = start(&mut timeline);
+        let mut response = page(&after, "epoch", None, None, vec![]);
+        response.window.max_seq = 1;
+        response.window.next_seq = 2;
+        apply(&mut timeline, &after, response);
+        assert_eq!(text(&timeline.rows[1]), "old answer");
+        assert!(timeline.rows.iter().all(|row| !row.active));
+        timeline.stream(timeline.generation, anonymous("new answer", None));
+        assert_eq!(timeline.rows.len(), 3);
+        assert_eq!(text(&timeline.rows[1]), "old answer");
+        assert_eq!(text(&timeline.rows[2]), "new answer");
     }
 
     #[test]

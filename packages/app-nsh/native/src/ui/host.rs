@@ -35,6 +35,7 @@ struct Connection {
     projects_loaded: Signal<bool>,
     routes: Signal<Vec<Project>>,
     conversations: Signal<Vec<String>>,
+    remembered_agent: RefCell<Option<String>>,
     hostname: Signal<String>,
     reconnect_host: RefCell<Option<ParsedHost>>,
     server_id: RefCell<Option<String>>,
@@ -58,6 +59,7 @@ impl Connection {
             projects_loaded: signal(false),
             routes: signal(Vec::new()),
             conversations: signal(Vec::new()),
+            remembered_agent: RefCell::new(None),
             hostname: signal(String::new()),
             reconnect_host: RefCell::new(None),
             server_id: RefCell::new(None),
@@ -87,6 +89,7 @@ impl Connection {
         }
         self.saved_routes.take();
         self.viewed.borrow_mut().clear();
+        self.remembered_agent.take();
         self.server_id.take();
         self.retry_attempt.set(0);
         self.reconnecting.set(false);
@@ -227,6 +230,9 @@ impl Connection {
                 })
                 .collect();
             let can_restore_agents = !restored.is_empty() && restored.len() == saved.projects.len();
+            if can_restore_agents {
+                self.remembered_agent.replace(saved.agents.first().cloned());
+            }
             self.routes.set(restored);
             if can_restore_agents {
                 self.conversations.set(saved.agents);
@@ -307,6 +313,7 @@ impl Connection {
         self.server_id.take();
         self.saved_routes.take();
         self.viewed.borrow_mut().clear();
+        self.remembered_agent.take();
         self.retry_attempt.set(0);
         if let Some(task) = self.task.take() {
             task.cancel();
@@ -324,6 +331,7 @@ impl Connection {
 
     fn open_project(&self, project: Project) {
         if self.connected.get_untracked() && !self.busy.get_untracked() {
+            self.remembered_agent.take();
             self.conversations.set(Vec::new());
             self.routes.set(vec![project]);
         }
@@ -530,12 +538,17 @@ pub(crate) fn screen() -> impl IntoElement {
                     .expect("project route requires a live connection");
                 let disconnect = page_state.clone();
                 let dismissed = page_state.clone();
+                let opener = page_state.clone();
                 project::page(
                     client,
                     selected.get_untracked(),
                     move || routes.set(Vec::new()),
                     move || disconnect.disconnect(),
-                    Rc::new(move |id| conversations.set(vec![id])),
+                    Rc::new(move |id| {
+                        opener.remembered_agent.replace(Some(id.clone()));
+                        conversations.set(vec![id]);
+                    }),
+                    page_state.remembered_agent.borrow().clone(),
                 )
                 .on_dismiss(move || {
                     if dismissed.current(generation) {
