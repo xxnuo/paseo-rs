@@ -1,7 +1,6 @@
 //! Direct WebSocket protocol projection; wire authority is packages/protocol/src/messages.ts.
 
 pub(crate) mod catalog;
-#[cfg(test)]
 pub(crate) mod conversation;
 
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
@@ -78,6 +77,7 @@ pub(crate) enum ServerEvent {
     ServerInfo(ServerInfo),
     Projects(ProjectList),
     Catalog(catalog::CatalogResponse),
+    Conversation(conversation::ConversationMessage),
     HelloRejected(HelloRejection),
     Pong,
     Unknown(Value),
@@ -207,9 +207,13 @@ pub(crate) fn parse_server_event(text: &str) -> Result<ServerEvent, ProtocolErro
                     message.payload.ok_or_else(malformed)?,
                 )?)),
                 kind => {
-                    match catalog::parse_response(kind, message.payload.unwrap_or(Value::Null))? {
+                    let payload = message.payload.unwrap_or(Value::Null);
+                    match catalog::parse_response(kind, payload.clone())? {
                         Some(response) => Ok(ServerEvent::Catalog(response)),
-                        None => Ok(ServerEvent::Unknown(frame)),
+                        None => match conversation::parse_message(kind, payload)? {
+                            Some(message) => Ok(ServerEvent::Conversation(message)),
+                            None => Ok(ServerEvent::Unknown(frame)),
+                        },
                     }
                 }
             }
@@ -252,6 +256,41 @@ mod tests {
 
     fn fixtures() -> Vec<Value> {
         serde_json::from_str(include_str!("../../protocol-fixtures/direct-session.json")).unwrap()
+    }
+
+    #[test]
+    fn conversation_messages_are_typed_in_production_and_malformed_known_replies_are_errors() {
+        let capture: Vec<Value> =
+            serde_json::from_str(include_str!("../../protocol-fixtures/conversation.json"))
+                .unwrap();
+        for entry in capture
+            .into_iter()
+            .filter(|entry| entry["direction"] == "server")
+        {
+            assert!(matches!(
+                parsed(&entry["frame"]),
+                ServerEvent::Conversation(_)
+            ));
+        }
+        let mut rejected = json!({"type":"session","message":{"type":"send_agent_message_response",
+            "payload":{"requestId":"send","agentId":"agent","accepted":false,"error":"Refused"}}});
+        let ServerEvent::Conversation(conversation::ConversationMessage::Sent(sent)) =
+            parsed(&rejected)
+        else {
+            panic!("not typed send")
+        };
+        assert!(sent.accepted().is_err());
+        rejected["message"]["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("error");
+        assert!(parse_server_event(&rejected.to_string()).is_err());
+        assert!(matches!(
+            parsed(
+                &json!({"type":"session","message":{"type":"future.chat.response","payload":{"requestId":"send"}}})
+            ),
+            ServerEvent::Unknown(_)
+        ));
     }
 
     fn parsed(value: &Value) -> ServerEvent {
