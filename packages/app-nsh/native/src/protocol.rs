@@ -50,13 +50,14 @@ pub(crate) fn hello(client_id: &str, password: Option<&str>) -> Result<String, P
             diagnostic: ProtocolDiagnostic::InvalidClientId,
         });
     }
-    // Advertise only implemented capabilities: binary chunking and subscriptions are not implied.
+    // Catalog and UI accept open provider IDs; without this flag the daemon hides plugin providers.
+    // Binary chunking and subscriptions are not implied.
     let mut frame = json!({
         "type": "hello",
         "clientId": client_id,
         "clientType": "browser",
         "protocolVersion": 1,
-        "capabilities": { "hello_rejection": true }
+        "capabilities": { "hello_rejection": true, "all_providers": true }
     });
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         frame["auth"] = json!({ "kind": "password", "password": password });
@@ -264,7 +265,7 @@ mod tests {
         assert_eq!(
             wire,
             json!({"type":"hello","clientId":"rust-client","clientType":"browser",
-            "protocolVersion":1,"capabilities":{"hello_rejection":true}})
+            "protocolVersion":1,"capabilities":{"hello_rejection":true,"all_providers":true}})
         );
         let wire: Value =
             serde_json::from_str(&hello("rust-client", Some("secret")).unwrap()).unwrap();
