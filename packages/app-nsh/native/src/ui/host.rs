@@ -2,6 +2,7 @@ use crate::{
     client::{Client, ClientError},
     host::{ParsedHost, parse_direct_host},
     protocol::{Project, ProjectList},
+    state::viewed::ViewedConversations,
 };
 #[path = "conversation.rs"]
 mod conversation;
@@ -12,9 +13,15 @@ use nsh_core::{prelude::*, storage::Storage};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    time::Duration,
 };
 
 const CLIENT_ID_KEY: &str = "paseo.nsh.client-id";
+
+struct SavedRoutes {
+    projects: Vec<Project>,
+    agents: Vec<String>,
+}
 
 struct Connection {
     owner: Owner,
@@ -29,6 +36,12 @@ struct Connection {
     routes: Signal<Vec<Project>>,
     conversations: Signal<Vec<String>>,
     hostname: Signal<String>,
+    reconnect_host: RefCell<Option<ParsedHost>>,
+    server_id: RefCell<Option<String>>,
+    saved_routes: RefCell<Option<SavedRoutes>>,
+    retry_attempt: Cell<u32>,
+    reconnecting: Signal<bool>,
+    viewed: RefCell<ViewedConversations>,
 }
 
 impl Connection {
@@ -46,6 +59,12 @@ impl Connection {
             routes: signal(Vec::new()),
             conversations: signal(Vec::new()),
             hostname: signal(String::new()),
+            reconnect_host: RefCell::new(None),
+            server_id: RefCell::new(None),
+            saved_routes: RefCell::new(None),
+            retry_attempt: Cell::new(0),
+            reconnecting: signal(false),
+            viewed: RefCell::new(ViewedConversations::default()),
         });
         let cleanup_state = state.clone();
         cleanup(move || {
@@ -56,6 +75,8 @@ impl Connection {
                 task.cancel();
             }
             cleanup_state.client.take();
+            cleanup_state.reconnect_host.take();
+            cleanup_state.saved_routes.take();
         });
         state
     }
@@ -64,9 +85,20 @@ impl Connection {
         if self.busy.get_untracked() || self.connected.get_untracked() {
             return;
         }
+        self.saved_routes.take();
+        self.viewed.borrow_mut().clear();
+        self.server_id.take();
+        self.retry_attempt.set(0);
+        self.reconnecting.set(false);
+        self.reconnect_host.replace(Some(copy_host(&host)));
+        self.connect_attempt(host, false);
+    }
+
+    fn connect_attempt(self: &Rc<Self>, host: ParsedHost, automatic: bool) {
         let client_id = match client_identity() {
             Ok(id) => id,
             Err(message) => {
+                self.disconnect();
                 self.status.set(message.to_owned());
                 return;
             }
@@ -75,7 +107,14 @@ impl Connection {
         let generation = self.next_generation();
         self.projects.set(Vec::new());
         self.projects_loaded.set(false);
-        self.status.set("正在连接主机…".to_owned());
+        self.status.set(
+            if automatic {
+                "正在重新连接主机…"
+            } else {
+                "正在连接主机…"
+            }
+            .to_owned(),
+        );
         let state = self.clone();
         let weak = Rc::downgrade(self);
         let task = self.owner.run(|| {
@@ -97,6 +136,14 @@ impl Connection {
                 if !state.current(generation) {
                     return;
                 }
+                if automatic && state.server_id.borrow().as_deref() != Some(client.server_info().server_id.as_str()) {
+                    state.disconnect();
+                    state.status.set("主机身份已变化，已停止自动重连，请确认地址后重新连接（server_identity_changed）".into());
+                    return;
+                }
+                state.server_id.replace(Some(client.server_info().server_id.clone()));
+                state.retry_attempt.set(0);
+                state.reconnecting.set(false);
                 state
                     .hostname
                     .set(client.server_info().hostname.clone().unwrap_or(label));
@@ -140,7 +187,11 @@ impl Connection {
         self.owner.is_live() && self.generation.get() == generation
     }
 
-    fn projects_finished(&self, generation: u64, result: Result<ProjectList, ClientError>) {
+    fn projects_finished(
+        self: &Rc<Self>,
+        generation: u64,
+        result: Result<ProjectList, ClientError>,
+    ) {
         if !self.current(generation) {
             return;
         }
@@ -163,6 +214,24 @@ impl Connection {
     }
 
     fn loaded(&self, projects: ProjectList) {
+        if let Some(saved) = self.saved_routes.take() {
+            let restored: Vec<_> = saved
+                .projects
+                .iter()
+                .filter_map(|previous| {
+                    projects
+                        .projects
+                        .iter()
+                        .find(|project| project.project_id == previous.project_id)
+                        .cloned()
+                })
+                .collect();
+            let can_restore_agents = !restored.is_empty() && restored.len() == saved.projects.len();
+            self.routes.set(restored);
+            if can_restore_agents {
+                self.conversations.set(saved.agents);
+            }
+        }
         self.projects.set(projects.projects);
         self.projects_loaded.set(true);
         self.connected.set(true);
@@ -171,13 +240,22 @@ impl Connection {
             .set(format!("已连接：{}", self.hostname.get_untracked()));
     }
 
-    fn failed(&self, generation: u64, error: ClientError) {
+    fn failed(self: &Rc<Self>, generation: u64, error: ClientError) {
         if !self.current(generation) {
             return;
         }
         self.next_generation();
         if let Some(task) = self.task.take() {
             task.cancel();
+        }
+        let retry = self.server_id.borrow().is_some()
+            && self.reconnect_host.borrow().is_some()
+            && retryable(error);
+        if retry && self.saved_routes.borrow().is_none() {
+            self.saved_routes.replace(Some(SavedRoutes {
+                projects: self.routes.get_untracked(),
+                agents: self.conversations.get_untracked(),
+            }));
         }
         self.routes.set(Vec::new());
         self.conversations.set(Vec::new());
@@ -187,10 +265,49 @@ impl Connection {
         self.projects.set(Vec::new());
         self.projects_loaded.set(false);
         self.status.set(format!("{error}（{}）", error.code()));
+        if retry {
+            self.schedule_reconnect();
+        } else {
+            self.reconnecting.set(false);
+            self.reconnect_host.take();
+            self.saved_routes.take();
+            self.server_id.take();
+        }
+    }
+
+    fn schedule_reconnect(self: &Rc<Self>) {
+        let attempt = self.retry_attempt.get();
+        self.retry_attempt.set(attempt.saturating_add(1));
+        let seconds = reconnect_delay(attempt);
+        self.reconnecting.set(true);
+        self.busy.set(true);
+        self.status
+            .set(format!("连接中断，将在 {seconds} 秒后自动重连；可取消重连"));
+        let generation = self.generation.get();
+        let state = self.clone();
+        let task = self.owner.run(|| {
+            spawn(async move {
+                timer(Duration::from_secs(seconds)).await;
+                if !state.current(generation) || !state.reconnecting.get_untracked() {
+                    return;
+                }
+                let host = state.reconnect_host.borrow().as_ref().map(copy_host);
+                if let Some(host) = host {
+                    state.connect_attempt(host, true);
+                }
+            })
+        });
+        self.task.replace(Some(task));
     }
 
     fn disconnect(&self) {
         self.next_generation();
+        self.reconnecting.set(false);
+        self.reconnect_host.take();
+        self.server_id.take();
+        self.saved_routes.take();
+        self.viewed.borrow_mut().clear();
+        self.retry_attempt.set(0);
         if let Some(task) = self.task.take() {
             task.cancel();
         }
@@ -213,6 +330,25 @@ impl Connection {
     }
 }
 
+fn copy_host(host: &ParsedHost) -> ParsedHost {
+    ParsedHost {
+        url: host.url.clone(),
+        password: host.password.clone(),
+        label: host.label.clone(),
+    }
+}
+
+fn retryable(error: ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::Closed | ClientError::Transport | ClientError::Timeout
+    )
+}
+
+fn reconnect_delay(attempt: u32) -> u64 {
+    1_u64.checked_shl(attempt).unwrap_or(30).min(30)
+}
+
 fn client_identity() -> Result<String, &'static str> {
     if let Some(id) = Storage::get_item(CLIENT_ID_KEY).filter(|id| !id.trim().is_empty()) {
         return Ok(id);
@@ -231,6 +367,7 @@ pub(crate) fn screen() -> impl IntoElement {
     let status = state.status;
     let projects = state.projects;
     let projects_loaded = state.projects_loaded;
+    let reconnecting = state.reconnecting;
     let routes = state.routes;
     let check = move || {
         if busy.get_untracked() || connected.get_untracked() {
@@ -329,7 +466,16 @@ pub(crate) fn screen() -> impl IntoElement {
                                     .disabled(move || !busy.get() && !connected.get())
                                     .on_press(move || disconnect_state.disconnect())
                                     .p_3()
-                                    .child(text("断开连接").text_color(move || theme().primary)),
+                                    .child(
+                                        text(move || {
+                                            if reconnecting.get() {
+                                                "取消重连"
+                                            } else {
+                                                "断开连接"
+                                            }
+                                        })
+                                        .text_color(move || theme().primary),
+                                    ),
                             )
                             .child(
                                 text(move || status.get())
@@ -376,12 +522,14 @@ pub(crate) fn screen() -> impl IntoElement {
             move || routes.get(),
             |project: &Project| project.project_id.clone(),
             move |selected, _| {
+                let generation = page_state.generation.get();
                 let client = page_state
                     .client
                     .borrow()
                     .clone()
                     .expect("project route requires a live connection");
                 let disconnect = page_state.clone();
+                let dismissed = page_state.clone();
                 project::page(
                     client,
                     selected.get_untracked(),
@@ -389,22 +537,35 @@ pub(crate) fn screen() -> impl IntoElement {
                     move || disconnect.disconnect(),
                     Rc::new(move |id| conversations.set(vec![id])),
                 )
-                .on_dismiss(move || routes.set(Vec::new()))
+                .on_dismiss(move || {
+                    if dismissed.current(generation) {
+                        routes.set(Vec::new());
+                    }
+                })
             },
         ))
         .child(each(
             move || conversations.get(),
             |id: &String| id.clone(),
             move |id, _| {
+                let generation = conversation_state.generation.get();
                 let client = conversation_state
                     .client
                     .borrow()
                     .clone()
                     .expect("conversation route requires a live connection");
-                conversation::page(client, id.get_untracked(), move || {
-                    conversations.set(Vec::new())
-                })
-                .on_dismiss(move || conversations.set(Vec::new()))
+                let dismissed = conversation_state.clone();
+                let id = id.get_untracked();
+                let memory = conversation_state
+                    .viewed
+                    .borrow_mut()
+                    .get(&client.server_info().server_id, &id);
+                conversation::page(client, id, memory, move || conversations.set(Vec::new()))
+                    .on_dismiss(move || {
+                        if dismissed.current(generation) {
+                            conversations.set(Vec::new());
+                        }
+                    })
             },
         ))
 }
@@ -413,6 +574,54 @@ pub(crate) fn screen() -> impl IntoElement {
 mod tests {
     use super::*;
     use nsh_core::element::{Runtime, create_root};
+
+    #[test]
+    fn recovery_backoff_caps_at_thirty_and_does_not_retry_auth_or_protocol_errors() {
+        assert_eq!(
+            (0..8).map(reconnect_delay).collect::<Vec<_>>(),
+            [1, 2, 4, 8, 16, 30, 30, 30]
+        );
+        assert_eq!(reconnect_delay(u32::MAX), 30);
+        for error in [
+            ClientError::Closed,
+            ClientError::Transport,
+            ClientError::Timeout,
+        ] {
+            assert!(retryable(error));
+        }
+        for error in [
+            ClientError::PasswordRequired,
+            ClientError::IncorrectPassword,
+            ClientError::InvalidProtocol,
+            ClientError::RequestRejected,
+        ] {
+            assert!(!retryable(error));
+        }
+    }
+
+    #[test]
+    fn authentication_failure_discards_saved_routes_and_credentials_without_retrying() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let (owner, state) = create_root(Connection::new);
+        let generation = state.next_generation();
+        state.server_id.replace(Some("same-server".into()));
+        state.reconnect_host.replace(Some(
+            parse_direct_host("ws://localhost:6767?password=private").unwrap(),
+        ));
+        state.saved_routes.replace(Some(SavedRoutes {
+            projects: Vec::new(),
+            agents: vec!["agent".into()],
+        }));
+        state.failed(generation, ClientError::IncorrectPassword);
+        assert!(state.task.borrow().is_none());
+        assert!(state.saved_routes.borrow().is_none());
+        assert!(state.reconnect_host.borrow().is_none());
+        assert!(!state.reconnecting.get_untracked());
+        assert!(!state.busy.get_untracked());
+        assert!(!state.status.get_untracked().contains("private"));
+        owner.dispose();
+    }
 
     #[test]
     fn an_old_connection_callback_cannot_clear_a_new_connection() {
