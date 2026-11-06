@@ -582,6 +582,8 @@ try {
       `project-connect-${target}-${randomUUID()}.png`,
     );
     await mkdir(path.dirname(failureScreenshot), { recursive: true });
+    const permissionScreenshot = failureScreenshot.replace("project-connect-", "chat-permission-");
+    const conversationScreenshot = failureScreenshot.replace("project-connect-", "chat-complete-");
     await writeFile(
       testFile,
       `import { expect, open, test } from "nsh/test";
@@ -740,6 +742,7 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   await sendMessage(chat.tool);
   await app.waitFor(allow, { timeout: 15000 });
   expect(app.enabled(stop)).toBe(true);
+  await app.screenshot(${JSON.stringify(permissionScreenshot)});
   await revealMessage("text:/shell/", 1);
   await app.press(allow);
   await app.waitUntil(() => !app.shows(allow));
@@ -764,6 +767,8 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   await sendMessage(chat.after);
   await waitIdle();
   await revealMessage("text:" + chat.afterReply, 1);
+  await app.screenshot(${JSON.stringify(conversationScreenshot)});
+  console.log("Chat screenshots: " + ${JSON.stringify(permissionScreenshot)} + ", " + ${JSON.stringify(conversationScreenshot)});
   await app.press("role:button[刷新会话]");
   await app.waitFor("text:会话已同步", { timeout: 15000 });
   await revealMessage("text:" + chat.afterReply, 1);
