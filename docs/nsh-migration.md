@@ -126,8 +126,10 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 ## Current evidence
 
 Rust-first feasibility: `native` is an independent Cargo workspace using the
-local NSH checkout. Its parser unit tests and a Rust-only headless input flow
-pass; `cargo check --target wasm32-unknown-unknown --lib` passes. This is a
+local NSH checkout. Four parser unit tests and three Rust-only headless input
+flows pass, as does clippy with warnings denied. The Rust-root GTK input flow
+passes under Xvfb; `cargo check --target wasm32-unknown-unknown --lib` passes.
+WASM checking is not a rendered browser test. This is a
 host-address validation surface, not an authenticated connection. Password URLs,
 SSH, local sockets and pairing remain separate unimplemented flows. The parser
 tracks the direct-address subset of `packages/protocol/src/host-target.ts`.
@@ -136,6 +138,17 @@ tracks the direct-address subset of `packages/protocol/src/host-target.ts`.
 cargo test --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target
 cargo check --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target --target wasm32-unknown-unknown --lib
 ```
+
+The TS SDK compatibility oracle now passes in QuickJS against an actual isolated
+loopback daemon: project list, agent creation, send/stream, cancel, reconnect
+(two connections) and history (six entries). The provider is fake Codex: no real
+model, restart, permission or protected-relay acceptance is implied. It runs via
+`node --import tsx scripts/run-nsh-live.mts /absolute/path/to/nsh`. The successful
+run used `paseo.worktrees/nsh-sdk`, with protocol/client/relay dist rebuilt and
+its own corrected `https-proxy-agent` dependency; the main checkout still has
+stale installed dependencies and is not asserted to run that fixture unchanged.
+`live.ts` is an oracle for the future Rust client's conformance, not a TSX
+product client.
 
 From the sibling NSH checkout:
 
