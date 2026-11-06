@@ -198,6 +198,14 @@ struct OverlayBase {
     live_head: Option<u64>,
 }
 
+#[derive(Default)]
+struct HeadBoundary {
+    arrival: u64,
+    turn_id: Option<String>,
+    user: Option<(u64, Position)>,
+    closed: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Recovery {
     None,
@@ -224,8 +232,10 @@ pub(crate) struct Timeline {
     overlay_base: Option<OverlayBase>,
     overflow_arrival: u64,
     completion_arrival: u64,
+    catch_up_arrival: u64,
     live_head: Option<u64>,
     attachment_arrival: u64,
+    head_boundary: HeadBoundary,
 }
 
 impl Timeline {
@@ -249,8 +259,10 @@ impl Timeline {
             overlay_base: None,
             overflow_arrival: 0,
             completion_arrival: 0,
+            catch_up_arrival: 0,
             live_head: None,
             attachment_arrival: 0,
+            head_boundary: HeadBoundary::default(),
         }
     }
 
@@ -272,6 +284,10 @@ impl Timeline {
 
     pub(crate) fn attach(&mut self) -> Action {
         self.freeze_live();
+        self.head_boundary = HeadBoundary {
+            arrival: self.next_arrival,
+            ..HeadBoundary::default()
+        };
         self.attachment_arrival = self.next_arrival;
         self.generation += 1;
         self.status = Status::Bootstrapping;
@@ -294,6 +310,7 @@ impl Timeline {
 
     pub(crate) fn detach(&mut self) {
         self.freeze_live();
+        self.head_boundary.closed = true;
         self.generation += 1;
         self.status = Status::Detached;
         self.subscribed = false;
@@ -434,7 +451,7 @@ impl Timeline {
             return Vec::new();
         }
         self.next_arrival += 1;
-        self.completion_arrival = self.next_arrival;
+        self.catch_up_arrival = self.next_arrival;
         if self.pending.is_some() {
             return Vec::new();
         }
@@ -528,10 +545,26 @@ impl Timeline {
     }
 
     fn observe(&mut self, event: Stream, arrival: u64) -> Recovery {
-        if matches!(
-            &event.event,
-            StreamEvent::Known(KnownStreamEvent::TurnStarted { .. })
-        ) {
+        if let StreamEvent::Known(KnownStreamEvent::TurnStarted { turn_id, .. }) = &event.event {
+            if arrival >= self.head_boundary.arrival {
+                let different_turn = self
+                    .head_boundary
+                    .turn_id
+                    .as_ref()
+                    .zip(turn_id.as_ref())
+                    .is_some_and(|(a, b)| a != b);
+                let user = if different_turn {
+                    None
+                } else {
+                    self.head_boundary.user.take()
+                };
+                self.head_boundary = HeadBoundary {
+                    arrival,
+                    turn_id: turn_id.clone(),
+                    user,
+                    closed: false,
+                };
+            }
             self.live_head = None;
             if let Some(base) = &mut self.overlay_base {
                 base.live_head = None;
@@ -553,6 +586,13 @@ impl Timeline {
             )
         );
         if completion {
+            if arrival >= self.head_boundary.arrival {
+                self.head_boundary = HeadBoundary {
+                    arrival,
+                    closed: true,
+                    ..HeadBoundary::default()
+                };
+            }
             self.live_head = None;
             self.completion_arrival = arrival;
             for row in &mut self.rows {
@@ -635,6 +675,27 @@ impl Timeline {
                     retained: Vec::new(),
                 });
             }
+        }
+        if let StreamEvent::Known(KnownStreamEvent::Timeline {
+            item: TimelineItem::User(_),
+            turn_id,
+            ..
+        }) = &event.event
+            && let Some((epoch, seq)) = position
+            && arrival >= self.head_boundary.arrival
+        {
+            self.head_boundary = HeadBoundary {
+                arrival,
+                turn_id: turn_id.clone(),
+                user: Some((
+                    arrival,
+                    Position {
+                        epoch: epoch.to_owned(),
+                        seq,
+                    },
+                )),
+                closed: false,
+            };
         }
         let row_id = self.reduce_live(event, provisional);
         if let Some(buffered) = self
@@ -993,10 +1054,13 @@ impl Timeline {
                     &*row.item,
                     TimelineItem::Assistant(_) | TimelineItem::Reasoning(_)
                 )
-        }) && self
-            .buffered
-            .iter()
-            .any(|buffered| buffered.event.seq.is_some_and(|seq| seq > last.span.end))
+        }) && (self.can_resume_after_prefix(last, &pending)
+            || !self.head_boundary.closed
+                && self.head_boundary.arrival <= pending.buffer_watermark
+                && self
+                    .buffered
+                    .iter()
+                    .any(|buffered| buffered.event.seq.is_some_and(|seq| seq > last.span.end)))
         {
             self.live_head = Some(last.id);
         }
@@ -1074,7 +1138,8 @@ impl Timeline {
             self.error = Some("Timeline snapshot did not reach the buffered events".into());
             return Vec::new();
         }
-        let owed_completion = self.completion_arrival > pending.buffer_watermark;
+        let owed_catch_up =
+            self.completion_arrival.max(self.catch_up_arrival) > pending.buffer_watermark;
         if self.completion_arrival > 0
             && self
                 .buffered
@@ -1086,8 +1151,9 @@ impl Timeline {
                 row.active = false;
             }
         }
-        if !owed_completion {
+        if !owed_catch_up {
             self.completion_arrival = 0;
+            self.catch_up_arrival = 0;
         }
         if !before && history.has_newer
             || pending.bootstrap
@@ -1096,7 +1162,7 @@ impl Timeline {
             || pending.bootstrap && !self.buffered.is_empty()
             || recovery != Recovery::None
             || self.resync_required
-            || owed_completion
+            || owed_catch_up
             || !before
                 && self.coverage.as_ref().is_some_and(|range| {
                     range
@@ -1116,6 +1182,30 @@ impl Timeline {
         }
         self.status = Status::Current;
         Vec::new()
+    }
+
+    fn can_resume_after_prefix(&self, row: &Row, pending: &Pending) -> bool {
+        let FetchPlan::After(cursor) = &pending.plan else {
+            return false;
+        };
+        if self.head_boundary.closed || cursor.epoch != row.epoch || row.span.end <= cursor.seq {
+            return false;
+        }
+        if self.head_boundary.arrival <= pending.buffer_watermark {
+            return true;
+        }
+        // A newer boundary needs identity or source evidence; anonymous older replies stay frozen.
+        if let (Some(current), Some(projected)) = (&self.head_boundary.turn_id, &row.turn_id) {
+            return current == projected;
+        }
+        self.head_boundary
+            .user
+            .as_ref()
+            .is_some_and(|(arrival, user)| {
+                *arrival > pending.buffer_watermark
+                    && user.epoch == row.epoch
+                    && user.seq < row.span.start
+            })
     }
 
     fn restore_row_ids(&mut self, previous: &[Row]) {
@@ -2926,5 +3016,165 @@ mod tests {
         assert!(apply(&mut timeline, &completion, response).is_empty());
         assert_eq!(timeline.rows.len(), 130);
         assert_eq!(text(&timeline.rows[129]), "NSH_CHAT_STREAM_中文");
+    }
+
+    #[test]
+    fn late_anonymous_turn_start_prevents_an_old_after_page_from_reopening_its_head() {
+        let mut timeline = current(vec![user(1)], 1);
+        let action = timeline.catch_up(timeline.generation).remove(0);
+        timeline.stream(timeline.generation, turn_started());
+        let prefix = entry(
+            2,
+            2,
+            json!({"type":"assistant_message","text":"old turn"}),
+            &[(2, 2)],
+        );
+        apply(
+            &mut timeline,
+            &action,
+            page(&action, "epoch", Some(2), Some(2), vec![prefix]),
+        );
+        assert!(timeline.live_head.is_none());
+        timeline.stream(timeline.generation, anonymous("new turn", Some(3)));
+        assert_eq!(timeline.rows.len(), 3);
+        assert_eq!(text(&timeline.rows[1]), "old turn");
+        assert_eq!(text(&timeline.rows[2]), "new turn");
+    }
+
+    #[test]
+    fn an_after_page_can_resume_a_new_identified_turn_that_started_after_the_request() {
+        let mut timeline = current(vec![user(1)], 1);
+        let action = timeline.catch_up(timeline.generation).remove(0);
+        let mut started = turn_started();
+        if let StreamEvent::Known(KnownStreamEvent::TurnStarted { turn_id, .. }) =
+            &mut started.event
+        {
+            *turn_id = Some("new-turn".into());
+        }
+        timeline.stream(timeline.generation, started);
+        let mut prefix = entry(
+            2,
+            2,
+            json!({"type":"assistant_message","text":"new "}),
+            &[(2, 2)],
+        );
+        prefix["turnId"] = json!("new-turn");
+        apply(
+            &mut timeline,
+            &action,
+            page(&action, "epoch", Some(2), Some(2), vec![prefix]),
+        );
+        let mut suffix = anonymous("turn", Some(3));
+        if let StreamEvent::Known(KnownStreamEvent::Timeline { turn_id, .. }) = &mut suffix.event {
+            *turn_id = Some("new-turn".into());
+        }
+        timeline.stream(timeline.generation, suffix);
+        assert_eq!(timeline.rows.len(), 2);
+        assert_eq!(text(&timeline.rows[1]), "new turn");
+    }
+
+    #[test]
+    fn a_post_request_canonical_user_sequence_proves_the_anonymous_prefix_is_new() {
+        let mut timeline = current(vec![user(1)], 1);
+        let action = timeline.catch_up(timeline.generation).remove(0);
+        timeline.stream(
+            timeline.generation,
+            live(
+                json!({"type":"user_message","text":"new prompt","clientMessageId":"new-user"}),
+                Some(2),
+            ),
+        );
+        timeline.stream(timeline.generation, turn_started());
+        let prompt = entry(
+            2,
+            2,
+            json!({"type":"user_message","text":"new prompt","clientMessageId":"new-user"}),
+            &[(2, 2)],
+        );
+        let prefix = entry(
+            3,
+            3,
+            json!({"type":"assistant_message","text":"new "}),
+            &[(3, 3)],
+        );
+        apply(
+            &mut timeline,
+            &action,
+            page(&action, "epoch", Some(2), Some(3), vec![prompt, prefix]),
+        );
+        timeline.stream(timeline.generation, anonymous("reply", Some(4)));
+        assert_eq!(timeline.rows.len(), 3);
+        assert_eq!(text(&timeline.rows[2]), "new reply");
+    }
+
+    #[test]
+    fn completion_and_tail_snapshots_do_not_activate_a_canonical_reply_head() {
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(timeline.generation, turn_started());
+        let after = timeline.catch_up(timeline.generation).remove(0);
+        timeline.stream(timeline.generation, finish());
+        let prefix = entry(
+            2,
+            2,
+            json!({"type":"assistant_message","text":"finished"}),
+            &[(2, 2)],
+        );
+        let followup = apply(
+            &mut timeline,
+            &after,
+            page(&after, "epoch", Some(2), Some(2), vec![prefix]),
+        )
+        .remove(0);
+        assert!(timeline.live_head.is_none());
+        let mut response = page(&followup, "epoch", None, None, vec![]);
+        response.window.max_seq = 2;
+        response.window.next_seq = 3;
+        apply(&mut timeline, &followup, response);
+        assert!(timeline.live_head.is_none());
+        timeline.stream(timeline.generation, anonymous("independent", Some(3)));
+        assert_eq!(timeline.rows.len(), 3);
+
+        let mut timeline = current(vec![user(1)], 1);
+        let tail = timeline.refresh(timeline.generation).remove(0);
+        let prefix = entry(
+            2,
+            2,
+            json!({"type":"assistant_message","text":"historical"}),
+            &[(2, 2)],
+        );
+        apply(
+            &mut timeline,
+            &tail,
+            page(&tail, "epoch", Some(1), Some(2), vec![user(1), prefix]),
+        );
+        assert!(timeline.live_head.is_none());
+        timeline.stream(timeline.generation, anonymous("independent", Some(3)));
+        assert_eq!(timeline.rows.len(), 3);
+        assert_eq!(text(&timeline.rows[1]), "historical");
+    }
+
+    #[test]
+    fn queued_manual_catch_up_does_not_finalize_an_active_live_segment() {
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(timeline.generation, turn_started());
+        timeline.stream(timeline.generation, anonymous("Hel", Some(2)));
+        let head = timeline.live_head;
+        let first = timeline.catch_up(timeline.generation).remove(0);
+        assert!(timeline.catch_up(timeline.generation).is_empty());
+        let mut response = page(&first, "epoch", None, None, vec![]);
+        response.window.max_seq = 2;
+        response.window.next_seq = 3;
+        let second = apply(&mut timeline, &first, response).remove(0);
+        assert_eq!(timeline.live_head, head);
+        assert!(timeline.rows[1].active);
+        let mut response = page(&second, "epoch", None, None, vec![]);
+        response.window.max_seq = 2;
+        response.window.next_seq = 3;
+        assert!(apply(&mut timeline, &second, response).is_empty());
+        assert_eq!(timeline.live_head, head);
+        assert!(timeline.rows[1].active);
+        timeline.stream(timeline.generation, anonymous("lo", Some(3)));
+        assert_eq!(timeline.rows.len(), 2);
+        assert_eq!(text(&timeline.rows[1]), "Hello");
     }
 }
