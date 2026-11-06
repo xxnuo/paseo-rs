@@ -16,7 +16,7 @@ use nsh_core::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     future::Future,
     pin::pin,
@@ -116,7 +116,7 @@ impl From<HelloRejection> for ClientError {
 // No Debug: the socket and future protocol fields can carry credentials.
 pub(crate) struct Client {
     owner: Owner,
-    releases: RefCell<Vec<Spawned<()>>>,
+    releases: Rc<RefCell<Vec<Spawned<()>>>>,
     socket: Rc<WebSocket>,
     pending: Rc<PendingRequests>,
     reader: Option<Spawned<()>>,
@@ -145,6 +145,26 @@ impl Client {
                     let socket = Rc::new(socket);
                     let pending = Rc::new(PendingRequests::default());
                     let on_state: Rc<dyn Fn(ClientError)> = Rc::new(on_state);
+                    let owner = Owner::current();
+                    let releases = Rc::new(RefCell::new(Vec::new()));
+                    let weak_pending = Rc::downgrade(&pending);
+                    let weak_releases = Rc::downgrade(&releases);
+                    let release_socket = socket.clone();
+                    let release_state = on_state.clone();
+                    *pending.orphan_cleanup.borrow_mut() = Some(Rc::new(move |token| {
+                        if let (Some(pending), Some(releases)) =
+                            (weak_pending.upgrade(), weak_releases.upgrade())
+                        {
+                            release_on(
+                                owner,
+                                &releases,
+                                release_socket.clone(),
+                                pending,
+                                release_state.clone(),
+                                token,
+                            );
+                        }
+                    }));
                     let read_socket = socket.clone();
                     let read_pending = pending.clone();
                     let read_state = on_state.clone();
@@ -161,8 +181,8 @@ impl Client {
                         }
                     });
                     return Ok(Self {
-                        owner: Owner::current(),
-                        releases: RefCell::new(Vec::new()),
+                        owner,
+                        releases,
                         socket,
                         pending,
                         reader: Some(reader),
@@ -361,13 +381,17 @@ impl Client {
         subscription_id: &str,
     ) -> Result<SubscriptionReleased, ConversationError> {
         // Stop local delivery before waiting for the daemon to acknowledge release.
-        self.pending.events.release_token(subscription_id);
+        self.pending.release_token(subscription_id);
         let id = uuid::Uuid::new_v4().to_string();
         let wire = conversation::release_subscription(&id, subscription_id);
-        match self
+        let result = self
             .chat_request(ReplyKind::SubscriptionReleased, &id, wire)
-            .await?
-        {
+            .await;
+        self.pending
+            .releasing_subscriptions
+            .borrow_mut()
+            .remove(subscription_id);
+        match result? {
             PendingReply::SubscriptionReleased(value)
                 if value.subscription_id == subscription_id =>
             {
@@ -379,29 +403,14 @@ impl Client {
 
     /// Page disposal stops local delivery immediately; the connection owns the bounded release RPC.
     pub(crate) fn release_after_page(&self, subscription_id: String) {
-        self.pending.events.release_token(&subscription_id);
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        self.releases
-            .borrow_mut()
-            .retain_mut(|task| std::pin::Pin::new(task).poll(&mut context).is_pending());
-        let socket = self.socket.clone();
-        let pending = self.pending.clone();
-        let on_state = self.on_state.clone();
-        let task = self.owner.run(|| {
-            spawn(async move {
-                let id = uuid::Uuid::new_v4().to_string();
-                let _ = request_on(
-                    &socket,
-                    &pending,
-                    &on_state,
-                    ReplyKind::SubscriptionReleased,
-                    &id,
-                    conversation::release_subscription(&id, &subscription_id),
-                )
-                .await;
-            })
-        });
-        self.releases.borrow_mut().push(task);
+        release_on(
+            self.owner,
+            &self.releases,
+            self.socket.clone(),
+            self.pending.clone(),
+            self.on_state.clone(),
+            subscription_id,
+        );
     }
 
     pub(crate) async fn fetch_timeline(
@@ -556,6 +565,43 @@ impl Client {
         )
         .await
     }
+}
+
+fn release_on(
+    owner: Owner,
+    releases: &RefCell<Vec<Spawned<()>>>,
+    socket: Rc<WebSocket>,
+    pending: Rc<PendingRequests>,
+    on_state: Rc<dyn Fn(ClientError)>,
+    subscription_id: String,
+) {
+    pending.release_token(&subscription_id);
+    if pending.failure.get().is_some() {
+        return;
+    }
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    releases
+        .borrow_mut()
+        .retain_mut(|task| std::pin::Pin::new(task).poll(&mut context).is_pending());
+    let task = owner.run(|| {
+        spawn(async move {
+            let id = uuid::Uuid::new_v4().to_string();
+            let _ = request_on(
+                &socket,
+                &pending,
+                &on_state,
+                ReplyKind::SubscriptionReleased,
+                &id,
+                conversation::release_subscription(&id, &subscription_id),
+            )
+            .await;
+            pending
+                .releasing_subscriptions
+                .borrow_mut()
+                .remove(&subscription_id);
+        })
+    });
+    releases.borrow_mut().push(task);
 }
 
 async fn request_on(
@@ -745,6 +791,11 @@ struct PendingRequests {
     slots: RefCell<HashMap<String, Rc<RefCell<PendingSlot>>>>,
     failure: Cell<Option<ClientError>>,
     events: Rc<EventListeners>,
+    // Buffered replies have not reached their caller yet; duplicate frames must retain them too.
+    active_subscriptions: RefCell<HashSet<String>>,
+    buffered_subscriptions: RefCell<HashMap<String, usize>>,
+    releasing_subscriptions: RefCell<HashSet<String>>,
+    orphan_cleanup: RefCell<Option<Rc<dyn Fn(String)>>>,
 }
 
 struct PendingSlot {
@@ -768,10 +819,18 @@ impl Drop for PendingGuard {
         {
             slots.remove(&self.request_id);
         }
+        drop(slots);
+        let abandoned = self.slot.borrow_mut().result.take();
+        if let Some(Ok(reply)) = abandoned
+            && let Some(token) = reply.subscription_id()
+        {
+            self.pending.unbuffer_token(token);
+            self.pending.cleanup_orphan(token);
+        }
     }
 }
 
-struct Response(Rc<RefCell<PendingSlot>>);
+struct Response(Rc<RefCell<PendingSlot>>, Rc<PendingRequests>);
 
 impl Future for Response {
     type Output = Result<PendingReply, ClientError>;
@@ -779,7 +838,23 @@ impl Future for Response {
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let mut reply = self.0.borrow_mut();
         match reply.result.take() {
-            Some(result) => Poll::Ready(result),
+            Some(result) => {
+                drop(reply);
+                if let Ok(reply) = &result
+                    && let Some(token) = reply.subscription_id()
+                {
+                    self.1.unbuffer_token(token);
+                    if self.1.failure.get().is_none()
+                        && !self.1.releasing_subscriptions.borrow().contains(token)
+                    {
+                        self.1
+                            .active_subscriptions
+                            .borrow_mut()
+                            .insert(token.into());
+                    }
+                }
+                Poll::Ready(result)
+            }
             None => {
                 reply.waker = Some(cx.waker().clone());
                 Poll::Pending
@@ -814,7 +889,7 @@ impl PendingRequests {
                 request_id,
                 slot: slot.clone(),
             },
-            Response(slot),
+            Response(slot, self.clone()),
         ))
     }
 
@@ -890,9 +965,54 @@ impl PendingRequests {
             }
         };
         if let Some(slot) = slot {
+            if let Some(token) = reply.subscription_id() {
+                *self
+                    .buffered_subscriptions
+                    .borrow_mut()
+                    .entry(token.into())
+                    .or_default() += 1;
+            }
             deliver(&slot, Ok(reply));
+        } else if let Some(token) = reply.subscription_id() {
+            self.cleanup_orphan(token);
         }
         Ok(())
+    }
+
+    fn unbuffer_token(&self, token: &str) {
+        let mut buffered = self.buffered_subscriptions.borrow_mut();
+        if let Some(count) = buffered.get_mut(token) {
+            *count -= 1;
+            if *count == 0 {
+                buffered.remove(token);
+            }
+        }
+    }
+
+    fn release_token(&self, token: &str) {
+        self.active_subscriptions.borrow_mut().remove(token);
+        self.releasing_subscriptions
+            .borrow_mut()
+            .insert(token.into());
+        self.events.release_token(token);
+    }
+
+    fn cleanup_orphan(&self, token: &str) {
+        if self.failure.get().is_some()
+            || self.active_subscriptions.borrow().contains(token)
+            || self.buffered_subscriptions.borrow().contains_key(token)
+            || !self
+                .releasing_subscriptions
+                .borrow_mut()
+                .insert(token.into())
+        {
+            return;
+        }
+        let cleanup = self.orphan_cleanup.borrow().clone();
+        // Schedule on the root owner: the single reader must keep dispatching the release reply.
+        if let Some(cleanup) = cleanup {
+            cleanup(token.into());
+        }
     }
 
     fn close(&self, error: ClientError) -> bool {
@@ -900,6 +1020,10 @@ impl PendingRequests {
             return false;
         }
         self.failure.set(Some(error));
+        self.orphan_cleanup.borrow_mut().take();
+        self.active_subscriptions.borrow_mut().clear();
+        self.buffered_subscriptions.borrow_mut().clear();
+        self.releasing_subscriptions.borrow_mut().clear();
         self.events.close();
         let slots = std::mem::take(&mut *self.slots.borrow_mut());
         for slot in slots.into_values() {
@@ -969,6 +1093,19 @@ enum PendingReply {
 }
 
 impl PendingReply {
+    fn subscription_id(&self) -> Option<&str> {
+        match self {
+            Self::Created(value) => value.creation.as_ref()?.subscription_id.as_deref(),
+            Self::CreationSubscription(value) => value
+                .subscription_id
+                .as_deref()
+                .or_else(|| value.snapshot.as_ref()?.subscription_id.as_deref()),
+            Self::SessionSubscription(value) => value.subscription_id.as_deref(),
+            Self::TimelineSubscription(value) => value.subscription_id.as_deref(),
+            _ => None,
+        }
+    }
+
     fn kind(&self) -> ReplyKind {
         match self {
             Self::Projects(_) => ReplyKind::Projects,
@@ -1135,6 +1272,194 @@ mod tests {
                 .remove("subscriptionId");
         }
         frame
+    }
+
+    fn subscription_frame(id: &str, token: &str) -> Value {
+        let mut frame = conversation_frame(id);
+        if id == "chat-create" {
+            frame["message"]["payload"]["creation"]["subscriptionId"] = json!(token);
+        } else {
+            frame["message"]["payload"]["subscriptionId"] = json!(token);
+        }
+        frame
+    }
+
+    fn capture_orphans(pending: &PendingRequests) -> Rc<RefCell<Vec<String>>> {
+        let tokens = Rc::new(RefCell::new(Vec::new()));
+        let captured = tokens.clone();
+        *pending.orphan_cleanup.borrow_mut() = Some(Rc::new(move |token| {
+            captured.borrow_mut().push(token);
+        }));
+        tokens
+    }
+
+    #[test]
+    fn cancelled_subscriptions_release_all_late_tokens_once() {
+        for (id, kind) in [
+            ("chat-create", ReplyKind::Created),
+            ("chat-observe", ReplyKind::CreationSubscription),
+            ("chat-events", ReplyKind::SessionSubscription),
+            ("chat-timeline", ReplyKind::TimelineSubscription),
+        ] {
+            let pending = Rc::new(PendingRequests::default());
+            let orphans = capture_orphans(&pending);
+            let (guard, response) = pending.register(id.into(), kind).unwrap();
+            let mut request = Box::pin(async move {
+                let _guard = guard;
+                response.await
+            });
+            assert!(
+                request
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            drop(request);
+            let frame = subscription_frame(id, "orphan");
+            pending.dispatch(event(&frame)).unwrap();
+            pending.dispatch(event(&frame)).unwrap();
+            assert_eq!(*orphans.borrow(), ["orphan"]);
+            assert!(pending.active_subscriptions.borrow().is_empty());
+            assert!(pending.buffered_subscriptions.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn timeout_releases_a_subscription_created_after_the_deadline() {
+        let pending = Rc::new(PendingRequests::default());
+        let orphans = capture_orphans(&pending);
+        let (guard, response) = pending
+            .register("chat-events".into(), ReplyKind::SessionSubscription)
+            .unwrap();
+        let expired = Cell::new(false);
+        let operation = async move {
+            let _guard = guard;
+            response.await
+        };
+        let deadline = future::poll_fn(|_| {
+            if expired.get() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        });
+        let mut request = Box::pin(race_deadline(operation, deadline));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(request.as_mut().poll(&mut cx).is_pending());
+        expired.set(true);
+        assert!(matches!(
+            request.as_mut().poll(&mut cx),
+            Poll::Ready(Err(ClientError::Timeout))
+        ));
+        assert!(pending.slots.borrow().is_empty());
+        pending
+            .dispatch(event(&subscription_frame("chat-events", "late")))
+            .unwrap();
+        assert_eq!(*orphans.borrow(), ["late"]);
+    }
+
+    #[test]
+    fn buffered_response_is_kept_until_consumed_or_its_guard_is_dropped() {
+        let pending = Rc::new(PendingRequests::default());
+        let orphans = capture_orphans(&pending);
+        let (guard, response) = pending
+            .register("chat-timeline".into(), ReplyKind::TimelineSubscription)
+            .unwrap();
+        let frame = subscription_frame("chat-timeline", "buffered");
+        pending.dispatch(event(&frame)).unwrap();
+        pending.dispatch(event(&frame)).unwrap();
+        assert!(orphans.borrow().is_empty());
+        drop(response);
+        drop(guard);
+        assert_eq!(*orphans.borrow(), ["buffered"]);
+        assert!(pending.buffered_subscriptions.borrow().is_empty());
+    }
+
+    #[test]
+    fn duplicate_delivered_responses_never_release_an_active_page_token() {
+        let pending = Rc::new(PendingRequests::default());
+        let orphans = capture_orphans(&pending);
+        let (guard, response) = pending
+            .register("chat-events".into(), ReplyKind::SessionSubscription)
+            .unwrap();
+        let frame = subscription_frame("chat-events", "active");
+        pending.dispatch(event(&frame)).unwrap();
+        assert!(matches!(
+            pin!(response)
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(_))
+        ));
+        drop(guard);
+        pending.dispatch(event(&frame)).unwrap();
+        assert!(orphans.borrow().is_empty());
+        assert!(pending.active_subscriptions.borrow().contains("active"));
+        let listener =
+            pending
+                .events
+                .register(EventTarget::Agent("agent".into()), Some("active"), |_| {});
+        pending.release_token("active");
+        pending.dispatch(event(&frame)).unwrap();
+        assert!(!pending.active_subscriptions.borrow().contains("active"));
+        assert!(!listener.listener.active.get());
+        assert!(orphans.borrow().is_empty());
+    }
+
+    #[test]
+    fn cancelling_one_buffered_response_does_not_release_another_owner_of_the_same_token() {
+        let pending = Rc::new(PendingRequests::default());
+        let orphans = capture_orphans(&pending);
+        let (first_guard, first_response) = pending
+            .register("first".into(), ReplyKind::SessionSubscription)
+            .unwrap();
+        let (_second_guard, second_response) = pending
+            .register("second".into(), ReplyKind::SessionSubscription)
+            .unwrap();
+        let mut frame = subscription_frame("chat-events", "shared");
+        frame["message"]["payload"]["requestId"] = json!("first");
+        pending.dispatch(event(&frame)).unwrap();
+        frame["message"]["payload"]["requestId"] = json!("second");
+        pending.dispatch(event(&frame)).unwrap();
+        drop(first_response);
+        drop(first_guard);
+        assert!(orphans.borrow().is_empty());
+        assert!(matches!(
+            pin!(second_response)
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(_))
+        ));
+        pending.dispatch(event(&frame)).unwrap();
+        assert!(orphans.borrow().is_empty());
+        assert!(pending.active_subscriptions.borrow().contains("shared"));
+    }
+
+    #[test]
+    fn nested_creation_token_is_reclaimed_and_close_forgets_all_ownership() {
+        let pending = Rc::new(PendingRequests::default());
+        let orphans = capture_orphans(&pending);
+        let mut frame = subscription_frame("chat-observe", "nested");
+        frame["message"]["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("subscriptionId");
+        frame["message"]["payload"]["snapshot"]["subscriptionId"] = json!("nested");
+        pending.dispatch(event(&frame)).unwrap();
+        assert_eq!(*orphans.borrow(), ["nested"]);
+        let (guard, response) = pending
+            .register("chat-events".into(), ReplyKind::SessionSubscription)
+            .unwrap();
+        pending
+            .dispatch(event(&subscription_frame("chat-events", "buffered")))
+            .unwrap();
+        pending.close(ClientError::Closed);
+        drop(response);
+        drop(guard);
+        assert!(pending.orphan_cleanup.borrow().is_none());
+        assert!(pending.active_subscriptions.borrow().is_empty());
+        assert!(pending.buffered_subscriptions.borrow().is_empty());
+        assert!(pending.releasing_subscriptions.borrow().is_empty());
+        assert_eq!(*orphans.borrow(), ["nested"]);
     }
 
     #[test]
