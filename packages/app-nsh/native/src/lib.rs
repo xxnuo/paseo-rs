@@ -5,13 +5,17 @@ mod host;
 #[path = "ui/host.rs"]
 mod host_ui;
 mod protocol;
+mod terminal_probe;
 
 use nsh_core::prelude::*;
+
+pub use terminal_probe::TerminalProbe;
 
 /// Registers the Rust application root for every NSH platform.
 #[native_module("paseo/native")]
 fn native(registry: &mut Registry) {
     registry.register::<App>();
+    registry.register::<TerminalProbe>();
 }
 
 /// Connection state and tasks belong to this root, independently of page contents.

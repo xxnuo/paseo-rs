@@ -1,7 +1,7 @@
 import { expect, open, test } from "nsh/test";
 
 test("Rust root validates a direct host using native input", async () => {
-  const app = await open("..", { width: 800, height: 600 });
+  const app = await open("..");
   await app.waitFor("连接开发主机");
   expect(app.enabled("role:button[检查地址]")).toBe(false);
   await app.type("label:主机地址", "ws://localhost:6767/ws?token=private");

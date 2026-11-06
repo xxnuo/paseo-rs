@@ -1,6 +1,6 @@
 //! Fixed-grid drawing experiments, independent of VT parsing and daemon connections.
 
-use nsh_base::theme::theme;
+use nsh_base::theme;
 use nsh_core::{
     canvas::CanvasTextBaseline,
     color::{Hsla, rgb, rgba},
