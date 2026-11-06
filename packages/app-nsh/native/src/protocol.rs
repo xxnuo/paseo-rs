@@ -104,7 +104,7 @@ pub(crate) struct ProjectList {
     pub(crate) projects: Vec<Project>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)] // Validate known wire fields even when this screen consumes only a subset.
 pub(crate) struct Project {
@@ -120,7 +120,7 @@ pub(crate) struct Project {
     pub(crate) project_icon_revision: Option<String>,
 }
 
-#[derive(Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProjectKind {
     Git,

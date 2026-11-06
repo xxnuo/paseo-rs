@@ -101,6 +101,7 @@ pub(crate) fn parse_response(
 }
 
 // Optional nullable fields have three wire states; None alone would erase missing versus null.
+#[derive(PartialEq)]
 pub(crate) enum Field<T> {
     Missing,
     Null,
@@ -137,7 +138,7 @@ pub(crate) struct Providers {
     pub(crate) entries: Vec<Provider>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Provider {
     pub(crate) provider: String,
@@ -169,7 +170,7 @@ pub(crate) enum ProviderStatus {
     Unavailable,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Model {
     pub(crate) provider: String,
@@ -181,7 +182,7 @@ pub(crate) struct Model {
     pub(crate) is_selectable: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 pub(crate) struct Mode {
     pub(crate) id: String,
     pub(crate) label: String,
@@ -239,7 +240,7 @@ pub(crate) struct Workspaces {
     pub(crate) page_info: PageInfo,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Workspace {
     pub(crate) id: String,
@@ -289,13 +290,13 @@ pub(crate) struct Agents {
     pub(crate) page_info: PageInfo,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 pub(crate) struct AgentEntry {
     pub(crate) agent: Agent,
     pub(crate) project: ProjectPlacement,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Agent {
     pub(crate) id: String,
@@ -322,7 +323,7 @@ pub(crate) enum AgentStatus {
     Closed,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectPlacement {
     pub(crate) project_key: String,
@@ -332,7 +333,7 @@ pub(crate) struct ProjectPlacement {
     pub(crate) checkout: Checkout,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Checkout {
     pub(crate) cwd: String,

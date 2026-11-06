@@ -1,8 +1,10 @@
 use crate::{
     client::{Client, ClientError},
     host::{ParsedHost, parse_direct_host},
-    protocol::ProjectList,
+    protocol::{Project, ProjectList},
 };
+#[path = "project.rs"]
+mod project;
 use nsh_base::{button, input, nav_page, nav_stack, theme};
 use nsh_core::{prelude::*, storage::Storage};
 use std::{
@@ -20,7 +22,9 @@ struct Connection {
     busy: Signal<bool>,
     connected: Signal<bool>,
     status: Signal<String>,
-    projects: Signal<String>,
+    projects: Signal<Vec<Project>>,
+    projects_loaded: Signal<bool>,
+    routes: Signal<Vec<Project>>,
     hostname: Signal<String>,
 }
 
@@ -34,7 +38,9 @@ impl Connection {
             busy: signal(false),
             connected: signal(false),
             status: signal(String::new()),
-            projects: signal(String::new()),
+            projects: signal(Vec::new()),
+            projects_loaded: signal(false),
+            routes: signal(Vec::new()),
             hostname: signal(String::new()),
         });
         let cleanup_state = state.clone();
@@ -63,7 +69,8 @@ impl Connection {
         };
         self.busy.set(true);
         let generation = self.next_generation();
-        self.projects.set(String::new());
+        self.projects.set(Vec::new());
+        self.projects_loaded.set(false);
         self.status.set("正在连接主机…".to_owned());
         let state = self.clone();
         let weak = Rc::downgrade(self);
@@ -152,16 +159,8 @@ impl Connection {
     }
 
     fn loaded(&self, projects: ProjectList) {
-        let names: Vec<String> = projects
-            .projects
-            .into_iter()
-            .map(|project| project.project_display_name)
-            .collect();
-        self.projects.set(if names.is_empty() {
-            "暂无项目".to_owned()
-        } else {
-            names.join("\n")
-        });
+        self.projects.set(projects.projects);
+        self.projects_loaded.set(true);
         self.connected.set(true);
         self.busy.set(false);
         self.status
@@ -176,10 +175,12 @@ impl Connection {
         if let Some(task) = self.task.take() {
             task.cancel();
         }
+        self.routes.set(Vec::new());
         self.client.take();
         self.connected.set(false);
         self.busy.set(false);
-        self.projects.set(String::new());
+        self.projects.set(Vec::new());
+        self.projects_loaded.set(false);
         self.status.set(format!("{error}（{}）", error.code()));
     }
 
@@ -188,12 +189,20 @@ impl Connection {
         if let Some(task) = self.task.take() {
             task.cancel();
         }
+        self.routes.set(Vec::new());
         self.client.take();
         self.connected.set(false);
         self.busy.set(false);
-        self.projects.set(String::new());
+        self.projects.set(Vec::new());
+        self.projects_loaded.set(false);
         self.hostname.set(String::new());
         self.status.set("已断开连接".to_owned());
+    }
+
+    fn open_project(&self, project: Project) {
+        if self.connected.get_untracked() && !self.busy.get_untracked() {
+            self.routes.set(vec![project]);
+        }
     }
 }
 
@@ -214,6 +223,8 @@ pub(crate) fn screen() -> impl IntoElement {
     let connected = state.connected;
     let status = state.status;
     let projects = state.projects;
+    let projects_loaded = state.projects_loaded;
+    let routes = state.routes;
     let check = move || {
         if busy.get_untracked() || connected.get_untracked() {
             return;
@@ -237,71 +248,129 @@ pub(crate) fn screen() -> impl IntoElement {
         }
     };
     let refresh_state = state.clone();
-    nav_stack().flex_1().child(
-        nav_page().title("Paseo").child(
-            view()
-                .flex_1()
-                .p_4()
-                .gap_3()
-                .pb_safe_area_plus(px(16.0))
-                .bg(move || theme().background)
-                .child(text("连接开发主机").text_color(move || theme().foreground))
-                .child(
-                    input()
-                        .label("主机地址")
-                        .placeholder("ws://localhost:6767/ws")
-                        .disabled(move || busy.get() || connected.get())
-                        .value(move || address.get())
-                        .on_change(move |value: &str| {
-                            address.set(value.to_owned());
-                            status.set(String::new());
-                        })
-                        .on_submit(move |_: &str| check())
-                        .p_3()
-                        .border_1()
-                        .border_color(move || theme().input)
-                        .text_color(move || theme().foreground),
+    let disconnect_state = state.clone();
+    let row_state = state.clone();
+    let page_state = state.clone();
+    nav_stack()
+        .flex_1()
+        .child(
+            nav_page().title("Paseo").child(
+                scroll().flex_1().child(
+                    view()
+                        .p_4()
+                        .gap_3()
+                        .pb_safe_area_plus(px(16.0))
+                        .bg(move || theme().background)
+                        .child(text("连接开发主机").text_color(move || theme().foreground))
+                        .child(
+                            input()
+                                .label("主机地址")
+                                .placeholder("ws://localhost:6767/ws")
+                                .disabled(move || busy.get() || connected.get())
+                                .value(move || address.get())
+                                .on_change(move |value: &str| {
+                                    address.set(value.to_owned());
+                                    status.set(String::new());
+                                })
+                                .on_submit(move |_: &str| check())
+                                .p_3()
+                                .border_1()
+                                .border_color(move || theme().input)
+                                .text_color(move || theme().foreground),
+                        )
+                        .child(
+                            button()
+                                .disabled(move || {
+                                    busy.get()
+                                        || connected.get()
+                                        || address.with(|value| value.trim().is_empty())
+                                })
+                                .on_press(check)
+                                .p_3()
+                                .child(text("检查地址").text_color(move || theme().primary)),
+                        )
+                        .child(
+                            button()
+                                .disabled(move || {
+                                    busy.get()
+                                        || connected.get()
+                                        || address.with(|value| value.trim().is_empty())
+                                })
+                                .on_press(connect)
+                                .p_3()
+                                .child(text("连接主机").text_color(move || theme().primary)),
+                        )
+                        .child(
+                            button()
+                                .disabled(move || busy.get() || !connected.get())
+                                .on_press(move || refresh_state.refresh())
+                                .p_3()
+                                .child(text("刷新项目").text_color(move || theme().primary)),
+                        )
+                        .child(
+                            button()
+                                .disabled(move || !busy.get() && !connected.get())
+                                .on_press(move || disconnect_state.disconnect())
+                                .p_3()
+                                .child(text("断开连接").text_color(move || theme().primary)),
+                        )
+                        .child(
+                            text(move || status.get()).text_color(move || theme().muted_foreground),
+                        )
+                        .child(
+                            text(move || {
+                                if projects_loaded.get()
+                                    && !busy.get()
+                                    && projects.with(Vec::is_empty)
+                                {
+                                    "暂无项目"
+                                } else {
+                                    ""
+                                }
+                            })
+                            .text_color(move || theme().foreground),
+                        )
+                        .child(each(
+                            move || projects.get(),
+                            |project: &Project| project.project_id.clone(),
+                            move |project, _| {
+                                let state = row_state.clone();
+                                button()
+                                    .disabled(move || busy.get())
+                                    .on_press(move || state.open_project(project.get_untracked()))
+                                    .p_3()
+                                    .child(
+                                        text(move || {
+                                            project.with(|project| {
+                                                project.project_display_name.clone()
+                                            })
+                                        })
+                                        .text_color(move || theme().foreground),
+                                    )
+                            },
+                        )),
+                ),
+            ),
+        )
+        .child(each(
+            move || routes.get(),
+            |project: &Project| project.project_id.clone(),
+            move |selected, _| {
+                let client = page_state
+                    .client
+                    .borrow()
+                    .clone()
+                    .expect("project route requires a live connection");
+                let disconnect = page_state.clone();
+                project::page(
+                    client,
+                    selected.get_untracked(),
+                    move || routes.set(Vec::new()),
+                    move || disconnect.disconnect(),
                 )
-                .child(
-                    button()
-                        .disabled(move || {
-                            busy.get()
-                                || connected.get()
-                                || address.with(|value| value.trim().is_empty())
-                        })
-                        .on_press(check)
-                        .p_3()
-                        .child(text("检查地址").text_color(move || theme().primary)),
-                )
-                .child(
-                    button()
-                        .disabled(move || {
-                            busy.get()
-                                || connected.get()
-                                || address.with(|value| value.trim().is_empty())
-                        })
-                        .on_press(connect)
-                        .p_3()
-                        .child(text("连接主机").text_color(move || theme().primary)),
-                )
-                .child(
-                    button()
-                        .disabled(move || busy.get() || !connected.get())
-                        .on_press(move || refresh_state.refresh())
-                        .p_3()
-                        .child(text("刷新项目").text_color(move || theme().primary)),
-                )
-                .child(
-                    button()
-                        .disabled(move || !busy.get() && !connected.get())
-                        .on_press(move || state.disconnect())
-                        .p_3()
-                        .child(text("断开连接").text_color(move || theme().primary)),
-                )
-                .child(text(move || status.get()).text_color(move || theme().muted_foreground))
-                .child(text(move || projects.get()).text_color(move || theme().foreground)),
-        ),
-    )
+                .on_dismiss(move || routes.set(Vec::new()))
+            },
+        ))
 }
 
 #[cfg(test)]
@@ -318,11 +387,44 @@ mod tests {
         state.next_generation();
         state.connected.set(true);
         state.status.set("已连接：new-host".to_owned());
-        state.projects.set("NEW_PROJECT".to_owned());
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/direct-session.json"
+        ))
+        .unwrap();
+        let project: Project = serde_json::from_value(
+            capture[5]["frame"]["message"]["payload"]["projects"][0].clone(),
+        )
+        .unwrap();
+        state.projects.set(vec![project]);
         state.failed(old, ClientError::Closed);
         assert!(state.connected.get_untracked());
         assert_eq!(state.status.get_untracked(), "已连接：new-host");
-        assert_eq!(state.projects.get_untracked(), "NEW_PROJECT");
+        assert_eq!(
+            state.projects.get_untracked()[0].project_id,
+            "fixture-project"
+        );
+        owner.dispose();
+    }
+
+    #[test]
+    fn disconnect_closes_project_pages_before_releasing_the_connection() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let (owner, state) = create_root(Connection::new);
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/direct-session.json"
+        ))
+        .unwrap();
+        let project: Project = serde_json::from_value(
+            capture[5]["frame"]["message"]["payload"]["projects"][0].clone(),
+        )
+        .unwrap();
+        state.connected.set(true);
+        state.open_project(project);
+        assert_eq!(state.routes.get_untracked().len(), 1);
+        state.disconnect();
+        assert!(state.routes.get_untracked().is_empty());
+        assert!(!state.connected.get_untracked());
         owner.dispose();
     }
 }

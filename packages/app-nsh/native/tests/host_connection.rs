@@ -84,6 +84,59 @@ impl WebSocketTask for Socket {
                     Duration::from_secs(1),
                 );
             }
+        } else if matches!(
+            request["message"]["type"].as_str(),
+            Some(
+                "fetch_workspaces_request"
+                    | "fetch_agents_request"
+                    | "get_providers_snapshot_request"
+            )
+        ) {
+            let catalog: Vec<Value> =
+                serde_json::from_str(include_str!("../../protocol-fixtures/catalog.json")).unwrap();
+            let response_type = match request["message"]["type"].as_str().unwrap() {
+                "fetch_workspaces_request" => "fetch_workspaces_response",
+                "fetch_agents_request" => "fetch_agents_response",
+                _ => "get_providers_snapshot_response",
+            };
+            let mut response = catalog
+                .iter()
+                .find(|entry| entry["frame"]["message"]["type"] == response_type)
+                .unwrap()["frame"]
+                .clone();
+            response["message"]["payload"]["requestId"] = request["message"]["requestId"].clone();
+            let mut delay = 5;
+            if response_type == "fetch_workspaces_response" {
+                // Distinct worktrees make a project-root substitution visible to this UI test.
+                for (index, workspace) in response["message"]["payload"]["entries"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .enumerate()
+                {
+                    workspace["name"] = json!(format!("worktree-{}", index + 1));
+                    workspace["workspaceDirectory"] =
+                        json!(format!("/fixture/worktree-{}", index + 1));
+                }
+            } else if response_type == "get_providers_snapshot_response" {
+                let cwd = request["message"]["cwd"].as_str().unwrap();
+                assert!(matches!(cwd, "/fixture/worktree-1" | "/fixture/worktree-2"));
+                let old = cwd.ends_with('1');
+                delay = if old { 7 } else { 2 };
+                response["message"]["payload"]["entries"]
+                    .as_array_mut()
+                    .unwrap()
+                    .truncate(1);
+                response["message"]["payload"]["entries"][0]["label"] = json!(if old {
+                    "OLD_WORKTREE"
+                } else {
+                    "CURRENT_WORKTREE"
+                });
+            }
+            self.later(
+                WebSocketEvent::Message(WebSocketData::Text(response.to_string())),
+                Duration::from_secs(delay),
+            );
         }
         Ok(())
     }
@@ -153,4 +206,45 @@ fn dropping_the_root_releases_an_idle_socket_with_a_pending_read() {
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     drop(app);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn leaving_a_project_cancels_page_requests_and_late_replies_cannot_replace_the_host_screen() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut app = connected_app(false, drops.clone());
+    app.press("role:button[LIVE_PUMP_PROJECT]").unwrap();
+    app.wait_for("正在加载工作区…").unwrap();
+    app.press("role:button[返回项目列表]").unwrap();
+    app.wait_for("已连接：fixture-host").unwrap();
+    app.run_for(Duration::from_secs(6)).unwrap();
+    assert!(!app.screen().shows("项目：LIVE_PUMP_PROJECT"));
+    assert!(app.screen().shows("已连接：fixture-host"));
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    app.press("role:button[LIVE_PUMP_PROJECT]").unwrap();
+    app.wait_for("正在加载工作区…").unwrap();
+    app.run_for(Duration::from_secs(6)).unwrap();
+    app.wait_for("已加载 2 个工作区").unwrap();
+    app.wait_for("已加载 2 个Agent").unwrap();
+    app.press("role:button[断开连接]").unwrap();
+    app.wait_for("已断开连接").unwrap();
+    assert!(!app.screen().shows("项目：LIVE_PUMP_PROJECT"));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn switching_workspaces_uses_their_real_directories_and_ignores_the_old_provider_reply() {
+    let mut app = connected_app(false, Arc::new(AtomicUsize::new(0)));
+    app.press("role:button[LIVE_PUMP_PROJECT]").unwrap();
+    app.wait_for("正在加载工作区…").unwrap();
+    app.run_for(Duration::from_secs(6)).unwrap();
+    app.press("role:button[工作区：worktree-1 · 空闲]").unwrap();
+    app.wait_for("服务商目录：/fixture/worktree-1").unwrap();
+    app.press("role:button[工作区：worktree-2 · 空闲]").unwrap();
+    app.wait_for("服务商目录：/fixture/worktree-2").unwrap();
+    app.run_for(Duration::from_secs(3)).unwrap();
+    app.wait_for("服务商：CURRENT_WORKTREE · 可用").unwrap();
+    app.run_for(Duration::from_secs(5)).unwrap();
+    assert!(app.screen().shows("服务商：CURRENT_WORKTREE · 可用"));
+    assert!(!app.screen().shows("OLD_WORKTREE"));
+    assert!(!app.screen().shows("服务商目录：/fixture/worktree-1"));
 }
