@@ -3,6 +3,8 @@ use crate::{
     host::{ParsedHost, parse_direct_host},
     protocol::{Project, ProjectList},
 };
+#[path = "conversation.rs"]
+mod conversation;
 #[path = "project.rs"]
 mod project;
 use nsh_base::{button, input, nav_page, nav_stack, theme};
@@ -25,6 +27,7 @@ struct Connection {
     projects: Signal<Vec<Project>>,
     projects_loaded: Signal<bool>,
     routes: Signal<Vec<Project>>,
+    conversations: Signal<Vec<String>>,
     hostname: Signal<String>,
 }
 
@@ -41,6 +44,7 @@ impl Connection {
             projects: signal(Vec::new()),
             projects_loaded: signal(false),
             routes: signal(Vec::new()),
+            conversations: signal(Vec::new()),
             hostname: signal(String::new()),
         });
         let cleanup_state = state.clone();
@@ -176,6 +180,7 @@ impl Connection {
             task.cancel();
         }
         self.routes.set(Vec::new());
+        self.conversations.set(Vec::new());
         self.client.take();
         self.connected.set(false);
         self.busy.set(false);
@@ -190,6 +195,7 @@ impl Connection {
             task.cancel();
         }
         self.routes.set(Vec::new());
+        self.conversations.set(Vec::new());
         self.client.take();
         self.connected.set(false);
         self.busy.set(false);
@@ -201,6 +207,7 @@ impl Connection {
 
     fn open_project(&self, project: Project) {
         if self.connected.get_untracked() && !self.busy.get_untracked() {
+            self.conversations.set(Vec::new());
             self.routes.set(vec![project]);
         }
     }
@@ -256,6 +263,8 @@ pub(crate) fn screen() -> impl IntoElement {
     let disconnect_state = state.clone();
     let row_state = state.clone();
     let page_state = state.clone();
+    let conversation_state = state.clone();
+    let conversations = state.conversations;
     nav_stack()
         .flex_1()
         .child(
@@ -378,8 +387,24 @@ pub(crate) fn screen() -> impl IntoElement {
                     selected.get_untracked(),
                     move || routes.set(Vec::new()),
                     move || disconnect.disconnect(),
+                    Rc::new(move |id| conversations.set(vec![id])),
                 )
                 .on_dismiss(move || routes.set(Vec::new()))
+            },
+        ))
+        .child(each(
+            move || conversations.get(),
+            |id: &String| id.clone(),
+            move |id, _| {
+                let client = conversation_state
+                    .client
+                    .borrow()
+                    .clone()
+                    .expect("conversation route requires a live connection");
+                conversation::page(client, id.get_untracked(), move || {
+                    conversations.set(Vec::new())
+                })
+                .on_dismiss(move || conversations.set(Vec::new()))
             },
         ))
 }

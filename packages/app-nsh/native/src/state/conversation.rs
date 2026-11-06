@@ -26,7 +26,7 @@ pub(crate) enum SendStatus {
 }
 
 // No Debug: drafts, messages, errors, permission input and responses can contain private data.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingMessage {
     pub(crate) agent_id: String,
@@ -53,6 +53,21 @@ pub(crate) struct PendingPermission {
     pub(crate) attempt: u64,
     pub(crate) error: Option<String>,
     revision: u64,
+}
+
+impl PartialEq for PendingPermission {
+    fn eq(&self, other: &Self) -> bool {
+        self.agent_id == other.agent_id
+            && Rc::ptr_eq(&self.request, &other.request)
+            && self.status == other.status
+            && self.attempt == other.attempt
+            && self.error == other.error
+            && match (&self.response, &other.response) {
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 #[derive(Clone)]
@@ -489,7 +504,9 @@ impl ConversationState {
             | KnownStreamEvent::TurnCanceled { turn_id, .. } => {
                 self.close_turn(&stream.agent_id, turn_id.as_deref())
             }
-            KnownStreamEvent::Timeline { item, .. } => self.observe_user(&stream.agent_id, item),
+            // Only the timeline reducer can prove canonical coverage; provisional/gapped echoes
+            // must not erase the persisted send identity before reconciliation.
+            KnownStreamEvent::Timeline { .. } => {}
             KnownStreamEvent::PermissionRequested { request, .. } => {
                 self.request_permission(&stream.agent_id, Rc::new(request.clone()))
             }
@@ -913,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn streams_apply_user_turn_and_permission_channels_and_ignore_unknown_events() {
+    fn stream_echoes_wait_for_canonical_coverage_while_turn_and_permission_events_apply() {
         let mut state = ConversationState::default();
         state.begin_send("agent", "one", "first");
         for event in [
@@ -928,6 +945,8 @@ mod tests {
             .unwrap();
             state.stream(&stream);
         }
+        assert_eq!(state.pending_messages()[0].status, SendStatus::Sending);
+        state.observe_user("agent", &user("one"));
         assert_eq!(state.pending_messages()[0].status, SendStatus::Observed);
         assert_eq!(
             state.turn("agent").unwrap().turn_id.as_deref(),

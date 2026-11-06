@@ -28,7 +28,7 @@ struct Question {
     dismiss_label: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct Answer {
     // Preserve selection order, as the original question form's Set does.
     selected: Vec<usize>,

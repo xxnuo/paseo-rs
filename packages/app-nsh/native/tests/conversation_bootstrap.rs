@@ -340,8 +340,12 @@ fn leaving_before_bootstrap_releases_tokens_and_late_history_cannot_reopen_the_c
     app.press("role:button[返回 Agent 详情]").unwrap();
     app.wait_for("text:/^Agent ID：fixture-agent-a/").unwrap();
     app.run_for(Duration::from_secs(6)).unwrap();
-    assert!(app.screen().shows("text:/^Agent ID：fixture-agent-a/"));
-    assert!(!app.screen().shows(&format!("text:会话：{TITLE}")));
+    assert!(
+        app.screen()
+            .matches("text:/^Agent ID：fixture-agent-a/")
+            .unwrap()
+    );
+    assert!(!app.screen().shows(&format!("会话：{TITLE}")));
     assert!(!app.screen().shows(LIVE_TEXT));
     {
         let trace = trace.lock().unwrap();

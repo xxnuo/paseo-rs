@@ -15,13 +15,13 @@ use std::{cell::RefCell, future::Future, rc::Rc};
 #[path = "create_agent.rs"]
 mod create_agent;
 
-struct RequestTask {
+pub(super) struct RequestTask {
     owner: Owner,
     task: RefCell<Option<Spawned<()>>>,
 }
 
 impl RequestTask {
-    fn new() -> Rc<Self> {
+    pub(super) fn new() -> Rc<Self> {
         let task = Rc::new(Self {
             owner: Owner::current(),
             task: RefCell::new(None),
@@ -34,7 +34,7 @@ impl RequestTask {
         task
     }
 
-    fn start(&self, work: impl Future<Output = ()> + 'static) {
+    pub(super) fn start(&self, work: impl Future<Output = ()> + 'static) {
         self.task.take();
         let task = self.owner.run(|| spawn(work));
         self.task.replace(Some(task));
@@ -231,6 +231,7 @@ pub(super) fn page(
     project: Project,
     back: impl Fn() + 'static,
     disconnect: impl Fn() + 'static,
+    open_agent: Rc<dyn Fn(String)>,
 ) -> Screen {
     let title = project.project_display_name.clone();
     let state = Rc::new(ProjectPage {
@@ -323,7 +324,7 @@ pub(super) fn page(
                     .child(each(
                         move || agents.get(),
                         |entry: &Rc<AgentEntry>| entry.agent.id.clone(),
-                        move |entry, _| agent_row(agent_client.clone(), entry),
+                        move |entry, _| agent_row(agent_client.clone(), entry, open_agent.clone()),
                     )),
             ),
     )
@@ -349,7 +350,11 @@ fn agent_status(status: &AgentStatus) -> &'static str {
     }
 }
 
-fn agent_row(client: Rc<Client>, entry: ReadSignal<Rc<AgentEntry>>) -> impl IntoElement {
+fn agent_row(
+    client: Rc<Client>,
+    entry: ReadSignal<Rc<AgentEntry>>,
+    open_agent: Rc<dyn Fn(String)>,
+) -> impl IntoElement {
     let open = signal(Vec::<String>::new());
     let detail_client = client.clone();
     view()
@@ -380,7 +385,13 @@ fn agent_row(client: Rc<Client>, entry: ReadSignal<Rc<AgentEntry>>) -> impl Into
         .child(each(
             move || open.get(),
             |id: &String| id.clone(),
-            move |id, _| agent_detail(detail_client.clone(), id.get_untracked()),
+            move |id, _| {
+                agent_detail(
+                    detail_client.clone(),
+                    id.get_untracked(),
+                    open_agent.clone(),
+                )
+            },
         ))
 }
 
@@ -419,7 +430,12 @@ impl Detail {
     }
 }
 
-fn agent_detail(client: Rc<Client>, id: String) -> impl IntoElement {
+fn agent_detail(
+    client: Rc<Client>,
+    id: String,
+    open_agent: Rc<dyn Fn(String)>,
+) -> impl IntoElement {
+    let open_id = id.clone();
     let state = Rc::new(Detail {
         task: RequestTask::new(),
         client,
@@ -432,6 +448,12 @@ fn agent_detail(client: Rc<Client>, id: String) -> impl IntoElement {
     let busy = state.busy;
     view()
         .gap_2()
+        .child(
+            button()
+                .on_press(move || open_agent(open_id.clone()))
+                .p_3()
+                .child(text("打开会话")),
+        )
         .child(text(move || text_value.get()).text_color(move || theme().foreground))
         .child(
             button()

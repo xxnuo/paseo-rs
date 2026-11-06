@@ -576,7 +576,7 @@ fn release_on(
     subscription_id: String,
 ) {
     pending.release_token(&subscription_id);
-    if pending.failure.get().is_some() {
+    if !owner.is_live() || pending.failure.get().is_some() {
         return;
     }
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
