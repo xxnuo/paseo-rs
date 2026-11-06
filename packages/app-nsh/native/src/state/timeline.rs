@@ -122,14 +122,14 @@ impl Row {
         match (&*self.item, &*other.item) {
             (TimelineItem::Tool(a), TimelineItem::Tool(b)) => a.call_id == b.call_id,
             (TimelineItem::User(a), TimelineItem::User(b)) => {
-                a.client_message_id
-                    .as_ref()
-                    .zip(b.client_message_id.as_ref())
-                    .is_some_and(|(a, b)| a == b)
-                    || a.message_id
+                if let (Some(a), Some(b)) = (&a.client_message_id, &b.client_message_id) {
+                    a == b
+                } else {
+                    a.message_id
                         .as_ref()
                         .zip(b.message_id.as_ref())
                         .is_some_and(|(a, b)| a == b)
+                }
             }
             // Provider message IDs identify a message, not segments on either side of a tool.
             _ => false,
@@ -165,13 +165,13 @@ pub(crate) enum Action {
     },
     Fetch {
         generation: u64,
-        request_id: String,
+        operation_id: String,
         plan: FetchPlan,
     },
 }
 
 struct Pending {
-    request_id: String,
+    operation_id: String,
     plan: FetchPlan,
     buffer_watermark: u64,
     bootstrap: bool,
@@ -268,7 +268,7 @@ impl Timeline {
 
     fn fetch(&mut self, plan: FetchPlan, bootstrap: bool) -> Action {
         self.next_request += 1;
-        let request_id = format!(
+        let operation_id = format!(
             "timeline:{}:{}:{}",
             self.agent_id, self.generation, self.next_request
         );
@@ -276,14 +276,14 @@ impl Timeline {
             self.status = Status::CatchingUp;
         }
         self.pending = Some(Pending {
-            request_id: request_id.clone(),
+            operation_id: operation_id.clone(),
             plan: plan.clone(),
             buffer_watermark: self.next_arrival,
             bootstrap,
         });
         Action::Fetch {
             generation: self.generation,
-            request_id,
+            operation_id,
             plan,
         }
     }
@@ -398,14 +398,20 @@ impl Timeline {
         vec![self.fetch(FetchPlan::Tail, false)]
     }
 
-    pub(crate) fn history(&mut self, generation: u64, history: History) -> Vec<Action> {
+    // The client correlates its wire request ID; the owner returns our operation token separately.
+    pub(crate) fn history(
+        &mut self,
+        generation: u64,
+        operation_id: &str,
+        history: History,
+    ) -> Vec<Action> {
         if generation != self.generation || history.agent_id != self.agent_id || !self.subscribed {
             return Vec::new();
         }
         let Some(pending) = &self.pending else {
             return Vec::new();
         };
-        if pending.request_id != history.request_id || !pending.plan.matches(&history.direction) {
+        if pending.operation_id != operation_id || !pending.plan.matches(&history.direction) {
             return Vec::new();
         }
         if let Some(error) = history.error.as_ref() {
@@ -697,10 +703,7 @@ mod tests {
         end: Option<u64>,
         entries: Vec<Value>,
     ) -> History {
-        let Action::Fetch {
-            request_id, plan, ..
-        } = action
-        else {
+        let Action::Fetch { plan, .. } = action else {
             panic!("not a fetch")
         };
         let (direction, merge) = match plan {
@@ -709,7 +712,7 @@ mod tests {
             FetchPlan::Before { merge_window, .. } => ("before", *merge_window),
         };
         serde_json::from_value(
-            json!({"requestId":request_id,"agentId":"agent","agent":null,
+            json!({"requestId":"7f56b035-8326-45b2-a45c-7680d10f2404","agentId":"agent","agent":null,
             "direction":direction,"mergeWindow":merge,"projection":"projected","epoch":epoch,
             "reset":false,"staleCursor":false,"gap":false,
             "window":{"minSeq":1,"maxSeq":end.unwrap_or(0),"nextSeq":end.unwrap_or(0)+1},
@@ -728,10 +731,15 @@ mod tests {
     }
 
     fn apply(timeline: &mut Timeline, action: &Action, history: History) -> Vec<Action> {
-        let Action::Fetch { generation, .. } = action else {
+        let Action::Fetch {
+            generation,
+            operation_id,
+            ..
+        } = action
+        else {
             panic!("not a fetch")
         };
-        timeline.history(*generation, history)
+        timeline.history(*generation, operation_id, history)
     }
 
     fn current(entries: Vec<Value>, end: u64) -> Timeline {
@@ -1081,15 +1089,11 @@ mod tests {
         }
         assert!(timeline.rows.is_empty());
         let action = timeline.subscribed(generation).remove(0);
-        let Action::Fetch { request_id, .. } = &action else {
-            panic!("not a fetch")
-        };
-        let mut value = capture
+        let value = capture
             .iter()
             .find(|frame| frame["frame"]["message"]["type"] == "fetch_agent_timeline_response")
             .unwrap()["frame"]["message"]["payload"]
             .clone();
-        value["requestId"] = json!(request_id);
         let after = apply(
             &mut timeline,
             &action,
@@ -1141,5 +1145,81 @@ mod tests {
         assert_eq!(timeline.status, Status::Failed);
         assert_eq!(timeline.rows.len(), 1);
         assert!(!timeline.error.as_ref().unwrap().contains("private"));
+    }
+
+    #[test]
+    fn operation_tokens_are_independent_of_wire_request_ids_and_reject_stale_operations() {
+        let mut timeline = Timeline::new("agent".into());
+        let tail = start(&mut timeline);
+        let Action::Fetch {
+            operation_id: old_operation,
+            ..
+        } = &tail
+        else {
+            panic!("not a fetch")
+        };
+        let response = page(
+            &tail,
+            "epoch",
+            Some(1),
+            Some(1),
+            vec![assistant(1, 1, "accepted")],
+        );
+        assert_ne!(response.request_id, *old_operation);
+        let after = apply(&mut timeline, &tail, response).remove(0);
+        let mut stale = page(&after, "epoch", None, None, vec![]);
+        stale.window.max_seq = 1;
+        stale.window.next_seq = 2;
+        assert!(
+            timeline
+                .history(timeline.generation, old_operation, stale)
+                .is_empty()
+        );
+        assert_eq!(timeline.status, Status::CatchingUp);
+        let mut response = page(&after, "epoch", None, None, vec![]);
+        response.window.max_seq = 1;
+        response.window.next_seq = 2;
+        assert!(apply(&mut timeline, &after, response).is_empty());
+        assert_eq!(timeline.status, Status::Current);
+        assert_eq!(text(&timeline.rows[0]), "accepted");
+    }
+
+    #[test]
+    fn user_client_ids_distinguish_independent_sends_with_the_same_provider_message_id() {
+        let user = |seq, client: Option<&str>| {
+            let mut item =
+                json!({"type":"user_message","messageId":"shared-provider-id","text":"same text"});
+            if let Some(client) = client {
+                item["clientMessageId"] = json!(client);
+            }
+            entry(seq, seq, item, &[(seq, seq)])
+        };
+        let mut timeline = current(
+            vec![user(1, Some("first-send")), user(2, Some("second-send"))],
+            2,
+        );
+        assert_eq!(timeline.rows.len(), 2);
+        assert!(
+            matches!(&*timeline.rows[0].item, TimelineItem::User(user) if user.client_message_id.as_deref() == Some("first-send"))
+        );
+        assert!(
+            matches!(&*timeline.rows[1].item, TimelineItem::User(user) if user.client_message_id.as_deref() == Some("second-send"))
+        );
+        let first_id = timeline.rows[0].id;
+        timeline.merge_entry(
+            "epoch",
+            serde_json::from_value(user(3, Some("first-send"))).unwrap(),
+        );
+        assert_eq!(timeline.rows.len(), 2);
+        assert_eq!(timeline.rows.last().unwrap().id, first_id);
+
+        let mut legacy = current(vec![user(1, None)], 1);
+        let legacy_id = legacy.rows[0].id;
+        legacy.merge_entry(
+            "epoch",
+            serde_json::from_value(user(2, Some("first-send"))).unwrap(),
+        );
+        assert_eq!(legacy.rows.len(), 1);
+        assert_eq!(legacy.rows[0].id, legacy_id);
     }
 }
