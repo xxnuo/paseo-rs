@@ -2,6 +2,7 @@
 
 use nsh_core::{
     element::{Owner, Spawned, spawn, timer},
+    geometry::{Points, Size, px},
     time::Clock,
     websocket::{
         WebSocketData, WebSocketEvent, WebSocketEvents, WebSocketRequest, WebSocketTask,
@@ -37,6 +38,7 @@ struct Trace {
 struct Transport {
     trace: Arc<Mutex<Trace>>,
     initial_history_delay: Duration,
+    compact_permission: bool,
 }
 
 struct Socket {
@@ -47,6 +49,7 @@ struct Socket {
     initial_history_delay: Duration,
     history_requests: usize,
     stopped: bool,
+    compact_permission: bool,
 }
 
 fn captured(file: &str, kind: &str) -> Value {
@@ -71,6 +74,26 @@ fn agent(stopped: bool) -> Value {
 }
 
 impl Socket {
+    fn snapshot(&self) -> Value {
+        let mut snapshot = agent(self.stopped);
+        if self.compact_permission && !self.stopped {
+            let rows: Vec<Value> = serde_json::from_str(TIMELINE).unwrap();
+            let mut permission = rows
+                .into_iter()
+                .find(|row| {
+                    row["frame"]["message"]["payload"]["event"]["type"] == "permission_requested"
+                })
+                .unwrap()["frame"]["message"]["payload"]["event"]["request"]
+                .clone();
+            permission["actions"] = json!([
+                {"id":"allow-once","label":"本次允许","behavior":"allow"},
+                {"id":"deny-once","label":"本次拒绝","behavior":"deny"}
+            ]);
+            snapshot["pendingPermissions"] = json!([permission]);
+        }
+        snapshot
+    }
+
     fn deliver(&mut self, frame: Value, delay: Duration) {
         let events = self.events.clone();
         let trace = self.trace.clone();
@@ -92,14 +115,37 @@ impl Socket {
         let mut response = captured(TIMELINE, "fetch_agent_timeline_response");
         let payload = &mut response["message"]["payload"];
         payload["agentId"] = json!(AGENT);
-        payload["agent"] = agent(self.stopped);
+        payload["agent"] = self.snapshot();
         payload["direction"] = request["message"]["direction"].clone();
-        payload["window"]["maxSeq"] = json!(5);
-        payload["window"]["nextSeq"] = json!(6);
+        let end = if self.compact_permission { 2 } else { 5 };
+        payload["window"]["maxSeq"] = json!(end);
+        payload["window"]["nextSeq"] = json!(end + 1);
         if request["message"]["direction"] == "after" {
             payload["entries"] = json!([]);
             payload["startCursor"] = Value::Null;
             payload["endCursor"] = Value::Null;
+        } else if self.compact_permission {
+            // Two ordinary long messages keep actual scrolling meaningful at both compact sizes.
+            let mut user = payload["entries"][0].clone();
+            let mut assistant = payload["entries"][2].clone();
+            for (entry, seq, label) in [
+                (&mut user, 1, "Earlier user"),
+                (&mut assistant, 2, "Earlier reply"),
+            ] {
+                entry["item"]["text"] = json!(
+                    (0..12)
+                        .map(|index| format!(
+                            "{label} paragraph {index}: retained conversation history."
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                );
+                entry["seqStart"] = json!(seq);
+                entry["seqEnd"] = json!(seq);
+                entry["sourceSeqRanges"] = json!([{"startSeq":seq,"endSeq":seq}]);
+            }
+            payload["entries"] = json!([user, assistant]);
+            payload["endCursor"]["seq"] = json!(2);
         } else {
             payload["endCursor"]["seq"] = json!(5);
             payload["entries"].as_array_mut().unwrap().push(json!({
@@ -150,13 +196,13 @@ impl WebSocketTask for Socket {
                     .as_array_mut()
                     .unwrap();
                 entries.retain(|entry| entry["agent"]["id"] == AGENT);
-                entries[0]["agent"] = agent(self.stopped);
+                entries[0]["agent"] = self.snapshot();
                 response
             }
             "fetch_agent_request" => {
                 assert_eq!(request["message"]["agentId"], AGENT);
                 let mut response = captured(CATALOG, "fetch_agent_response");
-                response["message"]["payload"]["agent"] = agent(self.stopped);
+                response["message"]["payload"]["agent"] = self.snapshot();
                 response
             }
             "session.events.set_subscription.request" => {
@@ -177,7 +223,7 @@ impl WebSocketTask for Socket {
                 assert_eq!(request["message"]["agentId"], AGENT);
                 assert_eq!(request["message"]["wholeTurns"], true);
                 self.history_requests += 1;
-                if self.history_requests == 1 {
+                if self.history_requests == 1 && !self.compact_permission {
                     // An existing run can stream before its bootstrap snapshot, without a new turn_started.
                     self.deliver(json!({"type":"session","message":{"type":"agent_stream","payload":{
                         "agentId":AGENT,"subscriptionId":TIMELINE_TOKEN,"seq":5,"epoch":"fixture-epoch",
@@ -186,7 +232,7 @@ impl WebSocketTask for Socket {
                             "item":{"type":"assistant_message","text":LIVE_TEXT}}
                     }}}), Duration::ZERO);
                     delay = self.initial_history_delay;
-                } else {
+                } else if !self.compact_permission {
                     // Keep bootstrap's catch-up snapshot from hiding an ignored initial Running snapshot.
                     delay = Duration::from_secs(1);
                 }
@@ -235,6 +281,7 @@ impl WebSocketTransport for Transport {
             initial_history_delay: self.initial_history_delay,
             history_requests: 0,
             stopped: false,
+            compact_permission: self.compact_permission,
         };
         let events = socket.events.clone();
         socket.jobs.push(spawn(async move {
@@ -247,12 +294,23 @@ impl WebSocketTransport for Transport {
 }
 
 fn open_conversation(delay: Duration) -> (Headless, Arc<Mutex<Trace>>) {
+    open_with_viewport(delay, Size::new(Points(390.0), Points(844.0)), false)
+}
+
+fn open_with_viewport(
+    delay: Duration,
+    viewport: Size<Points>,
+    compact_permission: bool,
+) -> (Headless, Arc<Mutex<Trace>>) {
     let trace = Arc::new(Mutex::new(Trace::default()));
     let mut config = EngineConfig::new(Root::of::<paseo_nsh::App>());
     config.clock = Clock::manual(SystemTime::UNIX_EPOCH);
+    config.viewport = viewport;
+    config.environment.window = viewport;
     config.websocket = Some(Arc::new(Transport {
         trace: trace.clone(),
         initial_history_delay: delay,
+        compact_permission,
     }));
     let mut app = Headless::start(config).unwrap();
     app.wait_for("连接开发主机").unwrap();
@@ -266,7 +324,11 @@ fn open_conversation(delay: Duration) -> (Headless, Arc<Mutex<Trace>>) {
         .unwrap();
     app.wait_for("text:/^Agent ID：fixture-agent-a/").unwrap();
     app.press("role:button[打开会话]").unwrap();
-    app.wait_for("正在同步会话…").unwrap();
+    if compact_permission {
+        app.wait_for("Permission required").unwrap();
+    } else {
+        app.wait_for("正在同步会话…").unwrap();
+    }
     app.run_for(Duration::from_millis(20)).unwrap();
     (app, trace)
 }
@@ -360,4 +422,62 @@ fn leaving_before_bootstrap_releases_tokens_and_late_history_cannot_reopen_the_c
     app.press("role:button[返回项目列表]").unwrap();
     app.wait_for("已连接：fixture-host").unwrap();
     assert!(!app.screen().enabled("label:主机地址").unwrap());
+}
+
+#[test]
+fn permissions_keep_messages_and_composer_operable_in_a_390_by_600_window() {
+    exercise_compact_permissions(600.0);
+}
+
+#[test]
+fn permissions_keep_messages_and_composer_operable_in_a_390_by_480_window() {
+    exercise_compact_permissions(480.0);
+}
+
+fn exercise_compact_permissions(height: f32) {
+    let (mut app, trace) = open_with_viewport(
+        Duration::ZERO,
+        Size::new(Points(390.0), Points(height)),
+        true,
+    );
+    app.wait_for("会话已同步").unwrap();
+    app.wait_for("已加载 2 条历史消息").unwrap();
+    app.wait_for("本次允许").unwrap();
+    app.wait_for("本次拒绝").unwrap();
+
+    // These resolve only shown nodes; a zero-height/clipped list or composer must fail.
+    assert!(app.screen().matches("id:conversation-messages").unwrap());
+    app.scroll("id:conversation-messages", px(-120.0)).unwrap();
+    assert!(app.screen().matches("label:消息").unwrap());
+    assert!(app.screen().matches("role:button[发送]").unwrap());
+    assert!(app.screen().enabled("role:button[停止]").unwrap());
+    app.type_text("label:消息", "draft beside a permission request")
+        .unwrap();
+    assert_eq!(
+        app.screen().input_text("label:消息").unwrap(),
+        Some("draft beside a permission request")
+    );
+    assert!(app.screen().enabled("role:button[发送]").unwrap());
+    app.press("role:button[停止]").unwrap();
+    app.run_for(Duration::from_millis(50)).unwrap();
+    app.wait_for("会话已同步").unwrap();
+    assert!(!app.screen().enabled("role:button[停止]").unwrap());
+    assert!(!app.screen().shows("Permission required"));
+    assert_eq!(
+        app.screen().input_text("label:消息").unwrap(),
+        Some("draft beside a permission request")
+    );
+    assert_eq!(
+        trace
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(
+                |request| request["message"]["type"] == "cancel_agent_request"
+                    && request["message"]["agentId"] == AGENT
+            )
+            .count(),
+        1
+    );
 }
