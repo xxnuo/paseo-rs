@@ -4,7 +4,8 @@ import { test } from "node:test";
 import { parseServerInfoStatusPayload, WSInboundMessageSchema } from "@getpaseo/protocol/messages";
 import { validateWSOutboundMessage } from "@getpaseo/protocol/validation/ws-outbound";
 
-// Captured from the unmodified SDK/daemon at Paseo commit 3ed57e9dd72df4927b08f16859eaf8d4d2d70ac2.
+// Captured at checkout b5eb278642865930553ab0d9b5bdd1e3cc95fd6b, upstream base 3710091a3.
+// SDK/daemon/protocol source files last changed at upstream commit 3ed57e9dd72df4927b08f16859eaf8d4d2d70ac2.
 // Source: client/src/daemon-client.ts sendHelloMessage; server/src/server/websocket-server.ts
 // sendHelloResponse/buildServerInfoStatusPayload; protocol/src/messages.ts project.list schemas.
 // Test daemon + fake provider; no relay, auth, model or HTTP-upgrade bytes. Identity/paths are replaced.
