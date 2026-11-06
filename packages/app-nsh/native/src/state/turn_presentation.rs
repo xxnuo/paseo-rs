@@ -1,4 +1,5 @@
 //! Turn footer placement and timing; never changes timeline rows or tool outcomes.
+//! Source: app/src/agent-stream/{turn-membership,layout}.ts and timeline/turn-time.ts.
 
 use super::{conversation::Turn, timeline::Row};
 use crate::protocol::conversation::TimelineItem;
@@ -46,6 +47,7 @@ pub(crate) struct CompletedFooter {
     /// Render after this chronological row, even when an earlier assistant owns the actions.
     pub(crate) after: RowKey,
     pub(crate) host: RowKey,
+    pub(crate) copyable: bool,
     /// Full turn membership; a copy action can collect only assistant text in this range.
     pub(crate) response_range: Range<usize>,
     pub(crate) timing: Option<Timing>,
@@ -147,6 +149,7 @@ fn completed_footer(rows: &[Row], range: Range<usize>) -> Option<CompletedFooter
     Some(CompletedFooter {
         after: last.into(),
         host: host.into(),
+        copyable: matches!(&*host.item, TimelineItem::Assistant(_)),
         is_latest: range.end == rows.len(),
         response_range: range,
         timing,
@@ -368,6 +371,7 @@ mod tests {
         assert_eq!(
             project(&rows, None, false, millis(10)).completed[0]
                 .timing
+                .as_ref()
                 .unwrap()
                 .duration_ms,
             Some(0)
@@ -376,6 +380,7 @@ mod tests {
         assert_eq!(
             project(&rows, None, false, millis(10)).completed[0]
                 .timing
+                .as_ref()
                 .unwrap()
                 .duration_ms,
             None

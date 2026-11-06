@@ -1,4 +1,5 @@
 //! Read-only tool details for Markdown rendering; tool status and private metadata stay untouched.
+//! Source: app/src/components/tool-call-details.tsx and utils/tool-call-detail-state.ts.
 
 use crate::protocol::conversation::{ToolCall, ToolStatus};
 use serde_json::{Map, Value};

@@ -1070,6 +1070,7 @@ dependencies = [
 name = "paseo-nsh"
 version = "0.15.2"
 dependencies = [
+ "chrono",
  "nsh-base",
  "nsh-core",
  "nsh-engine",

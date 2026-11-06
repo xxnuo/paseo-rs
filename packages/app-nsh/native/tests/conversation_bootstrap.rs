@@ -434,6 +434,74 @@ fn permissions_keep_messages_and_composer_operable_in_a_390_by_480_window() {
     exercise_compact_permissions(480.0);
 }
 
+#[test]
+fn turn_clock_stops_on_cancel_and_completed_copy_contains_only_this_turns_assistant_text() {
+    let (mut app, _) = open_with_viewport(
+        Duration::ZERO,
+        Size::new(Points(390.0), Points(600.0)),
+        true,
+    );
+    app.wait_for("会话已同步").unwrap();
+    assert_eq!(app.screen().count("id:turn-working-indicator").unwrap(), 1);
+    let started = chrono::DateTime::parse_from_rfc3339("2026-11-06T00:00:00Z").unwrap();
+    app.clock()
+        .set_system_time(SystemTime::UNIX_EPOCH + Duration::from_secs(started.timestamp() as u64));
+    app.run_for(Duration::from_secs(1)).unwrap();
+    app.wait_for("正在处理 · 1s").unwrap();
+    app.run_for(Duration::from_secs(2)).unwrap();
+    app.wait_for("正在处理 · 3s").unwrap();
+    app.set_environment("background", |environment| {
+        environment.lifecycle = nsh_core::platform::Lifecycle::Background
+    })
+    .unwrap();
+    app.run_for(Duration::from_secs(5)).unwrap();
+    assert!(app.screen().shows("正在处理 · 3s"));
+    app.set_environment("foreground", |environment| {
+        environment.lifecycle = nsh_core::platform::Lifecycle::Active
+    })
+    .unwrap();
+    app.wait_for("正在处理 · 8s").unwrap();
+    app.press("role:button[停止]").unwrap();
+    app.wait_for("复制本轮回复").unwrap();
+    assert_eq!(app.screen().count("id:turn-working-indicator").unwrap(), 0);
+    assert_eq!(app.screen().count("id:turn-footer").unwrap(), 1);
+    app.press("role:button[复制本轮回复]").unwrap();
+    let expected = (0..12)
+        .map(|index| format!("Earlier reply paragraph {index}: retained conversation history."))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert_eq!(app.screen().clipboard(), Some(expected.as_str()));
+    app.wait_for("已复制").unwrap();
+    let duration = app
+        .screen()
+        .texts()
+        .into_iter()
+        .find(|text| text.starts_with("用时 "))
+        .unwrap()
+        .to_owned();
+    app.press(&format!("role:button[{duration}]")).unwrap();
+    assert!(app.screen().matches("text:/^2026-/").unwrap());
+    app.run_for(Duration::from_secs(3)).unwrap();
+    app.wait_for(&duration).unwrap();
+    app.press("role:button[返回 Agent 详情]").unwrap();
+    app.run_for(Duration::from_secs(5)).unwrap();
+    assert_eq!(app.screen().count("id:turn-working-indicator").unwrap(), 0);
+}
+
+#[test]
+fn leaving_a_running_turn_disposes_its_clock_without_touching_disposed_signals() {
+    let (mut app, _) = open_with_viewport(
+        Duration::ZERO,
+        Size::new(Points(390.0), Points(600.0)),
+        true,
+    );
+    app.wait_for("会话已同步").unwrap();
+    assert_eq!(app.screen().count("id:turn-working-indicator").unwrap(), 1);
+    app.press("role:button[返回 Agent 详情]").unwrap();
+    app.run_for(Duration::from_secs(5)).unwrap();
+    assert_eq!(app.screen().count("id:turn-working-indicator").unwrap(), 0);
+}
+
 fn exercise_compact_permissions(height: f32) {
     let (mut app, trace) = open_with_viewport(
         Duration::ZERO,

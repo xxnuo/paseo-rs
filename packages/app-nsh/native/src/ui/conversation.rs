@@ -11,6 +11,7 @@ use crate::{
             CancelStatus, ConversationState, PendingMessage, PendingPermission, SendStatus,
         },
         timeline::{Action, FetchPlan, Row, Status, Timeline},
+        turn_presentation::{self, CompletedFooter, Timestamp},
         viewed::ViewedConversation,
     },
 };
@@ -28,6 +29,8 @@ use std::{
 
 #[path = "permission.rs"]
 mod permission;
+#[path = "turn_footer.rs"]
+mod turn_footer;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SavedComposer {
@@ -39,6 +42,8 @@ struct SavedComposer {
 enum DisplayRow {
     History(Row),
     Pending(PendingMessage),
+    Footer(CompletedFooter),
+    Running(Option<Timestamp>),
 }
 
 impl PartialEq for DisplayRow {
@@ -52,6 +57,8 @@ impl PartialEq for DisplayRow {
                     && Rc::ptr_eq(&a.item, &b.item)
             }
             (Self::Pending(a), Self::Pending(b)) => a == b,
+            (Self::Footer(a), Self::Footer(b)) => a == b,
+            (Self::Running(a), Self::Running(b)) => a == b,
             _ => false,
         }
     }
@@ -62,6 +69,8 @@ impl DisplayRow {
         match self {
             Self::History(row) => format!("history:{}:{}", row.epoch, row.id),
             Self::Pending(row) => format!("pending:{}", row.client_message_id),
+            Self::Footer(footer) => format!("turn-footer:{}:{}", footer.host.epoch, footer.host.id),
+            Self::Running(_) => "turn-working".into(),
         }
     }
 
@@ -93,34 +102,20 @@ impl DisplayRow {
                 SendStatus::Observed => "你",
             }
             .into(),
+            Self::Footer(_) | Self::Running(_) => String::new(),
         }
     }
 
     fn body(&self) -> String {
         match self {
             Self::Pending(row) => row.text.clone(),
+            Self::Footer(_) | Self::Running(_) => String::new(),
             Self::History(row) => match &*row.item {
                 TimelineItem::User(text)
                 | TimelineItem::Assistant(text)
                 | TimelineItem::Reasoning(text) => text.text.clone(),
                 TimelineItem::Tool(tool) => {
-                    let mut lines = Vec::new();
-                    for field in [
-                        "command", "filePath", "query", "url", "text", "output", "log",
-                    ] {
-                        if let Some(value) = tool
-                            .detail
-                            .fields
-                            .get(field)
-                            .and_then(serde_json::Value::as_str)
-                        {
-                            lines.push(value.to_owned());
-                        }
-                    }
-                    if let Some(error) = tool.error.as_str() {
-                        lines.push(error.to_owned());
-                    }
-                    lines.join("\n\n")
+                    crate::state::tool_presentation::present_tool(tool).markdown
                 }
                 TimelineItem::OtherKnown(value) => {
                     match value.get("type").and_then(serde_json::Value::as_str) {
@@ -147,15 +142,46 @@ impl DisplayRow {
     }
 }
 
-fn display_rows(history: Vec<Row>, pending: Vec<PendingMessage>) -> Vec<DisplayRow> {
+fn display_rows(
+    history: Vec<Row>,
+    pending: Vec<PendingMessage>,
+    current: Option<&crate::state::conversation::Turn>,
+) -> Vec<DisplayRow> {
+    let presentation = turn_presentation::project(
+        &history,
+        current,
+        pending.iter().any(|message| {
+            matches!(
+                message.status,
+                SendStatus::Sending | SendStatus::Accepted | SendStatus::Queued
+            )
+        }),
+        nsh_core::time::unix_ms() as i64,
+    );
     let pending_ids: std::collections::HashSet<_> = pending
         .iter()
         .map(|message| message.client_message_id.as_str())
         .collect();
-    let mut rows: Vec<_> = history.into_iter().filter(|row| {
-        !(row.provisional && matches!(&*row.item, TimelineItem::User(text) if text.client_message_id.as_deref().is_some_and(|id| pending_ids.contains(id))))
-    }).map(DisplayRow::History).collect();
+    let mut rows = Vec::new();
+    let mut footers = presentation.completed.into_iter().peekable();
+    for row in history {
+        let footer = footers
+            .peek()
+            .is_some_and(|footer| footer.after.epoch == row.epoch && footer.after.id == row.id)
+            .then(|| footers.next().unwrap());
+        if !(row.provisional
+            && matches!(&*row.item, TimelineItem::User(text) if text.client_message_id.as_deref().is_some_and(|id| pending_ids.contains(id))))
+        {
+            rows.push(DisplayRow::History(row));
+        }
+        if let Some(footer) = footer {
+            rows.push(DisplayRow::Footer(footer));
+        }
+    }
     rows.extend(pending.into_iter().map(DisplayRow::Pending));
+    if let Some(running) = presentation.running {
+        rows.push(DisplayRow::Running(running.started_at));
+    }
     rows
 }
 
@@ -194,6 +220,32 @@ struct Conversation {
 }
 
 impl Conversation {
+    fn copy_turn(&self, footer: CompletedFooter) {
+        let timeline = self.timeline.borrow();
+        let transactions = self.transactions.borrow();
+        let current = turn_presentation::project(
+            &timeline.rows,
+            transactions.turn(&self.id),
+            false,
+            nsh_core::time::unix_ms() as i64,
+        );
+        if let Some(current) = current
+            .completed
+            .into_iter()
+            .find(|current| current.host == footer.host && current.copyable)
+        {
+            let text = timeline.rows[current.response_range]
+                .iter()
+                .filter_map(|row| match &*row.item {
+                    TimelineItem::Assistant(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            set_clipboard(text);
+        }
+    }
+
     fn clear_attention(self: &Rc<Self>, trigger: Trigger) {
         if !self.active.get() || !self.client.is_connected() {
             return;
@@ -319,7 +371,9 @@ impl Conversation {
             "已加载 {} 条历史消息",
             history.iter().filter(|row| !row.provisional).count()
         ));
-        self.rows.set(display_rows(history, pending));
+        let current_turn = self.transactions.borrow().turn(&self.id).cloned();
+        self.rows
+            .set(display_rows(history, pending, current_turn.as_ref()));
         self.permissions.set(permissions);
         self.stopping.set(stopping);
         self.older.set(older);
@@ -1042,57 +1096,197 @@ pub(super) fn page(
     let retry = state.clone();
     let permission_state = state.clone();
     nav_page().title("会话").child(
-        view().flex_1().pb_keyboard().bg(move || theme().background)
-            .child(view().p_2().gap_1()
-                .child(view().flex_row().gap_2()
-                    .child(button().on_press(back).p_2().child(text("返回 Agent 详情")))
-                    .child(text(move || format!("会话：{}", title.get())).flex_1().number_of_lines(1).text_color(move || theme().foreground)))
-                .child(view().flex_row().gap_2()
-                    .child(text(move || sync_status.get()).text_color(move || theme().muted_foreground))
-                    .child(text(move || history_status.get()).text_color(move || theme().muted_foreground)))
-                .child(view().flex_row().gap_2()
-                    .child(button().on_press(move || refresh.refresh()).p_2().child(text("刷新会话")))
-                    .child(button().disabled(move || !older.get() || !ready.get() || fetching.get()).on_press(move || previous.load_older()).p_2().child(text("加载更早消息")))))
-            .child(virtual_list(move || rows.with(Vec::len), move |at| {
-                let row = computed(move || rows.with(|rows| rows.get(at.index()).cloned()));
-                let retry = retry.clone();
-                let links = retry.clone();
-                view().p_3().gap_2()
-                    .child(text(move || row.with(|row| row.as_ref().map(DisplayRow::label).unwrap_or_default())).text_color(move || theme().muted_foreground))
-                    .child(text_view().markdown(move || row.with(|row| row.as_ref().map(|row| SharedString::from(row.body()))))
-                        .options(move || MarkdownOptions { streaming: row.with(|row| matches!(row, Some(DisplayRow::History(row)) if row.active)), ..Default::default() })
-                        .selectable(true).links(TextViewLinks::Report)
-                        .on_link_press(move |event: &TextViewLinkPressEvent| links.open_link(event.url.to_string()))
-                        .text_color(move || theme().foreground))
-                    .child(text(move || row.with(|row| match row {
-                        Some(DisplayRow::Pending(message)) => message.error.clone().unwrap_or_default(),
-                        _ => String::new(),
-                    })).text_color(move || theme().muted_foreground))
-                    .child(when(move || row.with(|row| matches!(row, Some(DisplayRow::Pending(message)) if matches!(message.status, SendStatus::UnknownOutcome | SendStatus::Rejected))), move || {
-                        let retry = retry.clone();
-                        button().disabled(move || sending.get() || !ready.get()).on_press(move || {
-                            if let Some(DisplayRow::Pending(message)) = row.get_untracked() { retry.retry(message.client_message_id); }
-                        }).p_2().child(text("重试发送"))
-                    }))
-            }).keys(move || rows.with(|rows| rows.iter().map(DisplayRow::key).collect::<Vec<_>>()))
-                .test_id("conversation-messages").estimated_item_size(px(90.0)).alignment(nsh_core::ListAlignment::Bottom).follow_end(px(60.0)).keyboard_taps(KeyboardTaps::Handled).flex_1())
+        view()
+            .flex_1()
+            .pb_keyboard()
+            .bg(move || theme().background)
+            .child(
+                view()
+                    .p_2()
+                    .gap_1()
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .child(button().on_press(back).p_2().child(text("返回 Agent 详情")))
+                            .child(
+                                text(move || format!("会话：{}", title.get()))
+                                    .flex_1()
+                                    .number_of_lines(1)
+                                    .text_color(move || theme().foreground),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .child(
+                                text(move || sync_status.get())
+                                    .text_color(move || theme().muted_foreground),
+                            )
+                            .child(
+                                text(move || history_status.get())
+                                    .text_color(move || theme().muted_foreground),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .child(
+                                button()
+                                    .on_press(move || refresh.refresh())
+                                    .p_2()
+                                    .child(text("刷新会话")),
+                            )
+                            .child(
+                                button()
+                                    .disabled(move || {
+                                        !older.get() || !ready.get() || fetching.get()
+                                    })
+                                    .on_press(move || previous.load_older())
+                                    .p_2()
+                                    .child(text("加载更早消息")),
+                            ),
+                    ),
+            )
+            .child(
+                virtual_list(
+                    move || rows.with(Vec::len),
+                    move |at| {
+                        let row = computed(move || rows.with(|rows| rows.get(at.index()).cloned()));
+                        conversation_row(row, retry.clone())
+                    },
+                )
+                .keys(move || {
+                    rows.with(|rows| rows.iter().map(DisplayRow::key).collect::<Vec<_>>())
+                })
+                .test_id("conversation-messages")
+                .estimated_item_size(px(90.0))
+                .alignment(nsh_core::ListAlignment::Bottom)
+                .follow_end(px(60.0))
+                .keyboard_taps(KeyboardTaps::Handled)
+                .flex_1(),
+            )
             // Reserve the composer and a readable message viewport before sizing permission forms.
-            .child(scroll().test_id("conversation-permissions").keyboard_taps(KeyboardTaps::Handled)
-                .max_h(move || px((window().height.0 - keyboard_height().0 - 286.0).clamp(48.0, 220.0))).child(each(
-                move || permissions.get(), |permission: &PendingPermission| permission.request.id.clone(),
-                move |pending, _| permission::card(permission_state.clone(), pending),
-            )))
-            .child(view().p_2().gap_1().pb_safe_area_plus(px(8.0))
-                .child(when(move || !notice.with(String::is_empty), move || scroll().max_h(px(48.0))
-                    .child(text(move || notice.get()).text_color(move || theme().muted_foreground))))
-                .child(input().label("消息").multiline(true).value(move || draft.get()).disabled(!storage_valid)
-                    .on_focus(move |_: &()| focus.clear_attention(Trigger::InputFocus))
-                    .on_change(move |value: &str| { draft.set(value.to_owned()); editor.save(); })
-                    .p_2().max_h(px(100.0)).border_1().border_color(move || theme().input).text_color(move || theme().foreground))
-                .child(view().flex_row().gap_2()
-                    .child(button().disabled(move || !ready.get() || sending.get() || stopping.get() || !storage_valid || draft.with(|text| text.trim().is_empty())).on_press(move || sender.send()).p_2().child(text("发送")))
-                    .child(button().disabled(move || stopping.get() || (!running.get() && permissions.with(Vec::is_empty))).on_press(move || stop.stop()).p_2().child(text(move || if stopping.get() { "正在停止…" } else { "停止" })))))
+            .child(
+                scroll()
+                    .test_id("conversation-permissions")
+                    .keyboard_taps(KeyboardTaps::Handled)
+                    .max_h(move || {
+                        px((window().height.0 - keyboard_height().0 - 286.0).clamp(48.0, 220.0))
+                    })
+                    .child(each(
+                        move || permissions.get(),
+                        |permission: &PendingPermission| permission.request.id.clone(),
+                        move |pending, _| permission::card(permission_state.clone(), pending),
+                    )),
+            )
+            .child(
+                view()
+                    .p_2()
+                    .gap_1()
+                    .pb_safe_area_plus(px(8.0))
+                    .child(when(
+                        move || !notice.with(String::is_empty),
+                        move || {
+                            scroll().max_h(px(48.0)).child(
+                                text(move || notice.get())
+                                    .text_color(move || theme().muted_foreground),
+                            )
+                        },
+                    ))
+                    .child(
+                        input()
+                            .label("消息")
+                            .multiline(true)
+                            .value(move || draft.get())
+                            .disabled(!storage_valid)
+                            .on_focus(move |_: &()| focus.clear_attention(Trigger::InputFocus))
+                            .on_change(move |value: &str| {
+                                draft.set(value.to_owned());
+                                editor.save();
+                            })
+                            .p_2()
+                            .max_h(px(100.0))
+                            .border_1()
+                            .border_color(move || theme().input)
+                            .text_color(move || theme().foreground),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .child(
+                                button()
+                                    .disabled(move || {
+                                        !ready.get()
+                                            || sending.get()
+                                            || stopping.get()
+                                            || !storage_valid
+                                            || draft.with(|text| text.trim().is_empty())
+                                    })
+                                    .on_press(move || sender.send())
+                                    .p_2()
+                                    .child(text("发送")),
+                            )
+                            .child(
+                                button()
+                                    .disabled(move || {
+                                        stopping.get()
+                                            || (!running.get() && permissions.with(Vec::is_empty))
+                                    })
+                                    .on_press(move || stop.stop())
+                                    .p_2()
+                                    .child(text(move || {
+                                        if stopping.get() {
+                                            "正在停止…"
+                                        } else {
+                                            "停止"
+                                        }
+                                    })),
+                            ),
+                    ),
+            ),
     )
+}
+
+fn conversation_row(row: Memo<Option<DisplayRow>>, state: Rc<Conversation>) -> impl IntoElement {
+    let retry = state.clone();
+    let links = state.clone();
+    let sending = state.sending;
+    let ready = state.ready;
+    view()
+        .child(when(move || row.with(|row| matches!(row, Some(DisplayRow::History(_) | DisplayRow::Pending(_)))), move || {
+            let retry = retry.clone();
+            let links = links.clone();
+            view().p_3().gap_2()
+                .child(text(move || row.with(|row| row.as_ref().map(DisplayRow::label).unwrap_or_default())).text_color(move || theme().muted_foreground))
+                .child(text_view().markdown(move || row.with(|row| row.as_ref().map(|row| SharedString::from(row.body()))))
+                    .options(move || MarkdownOptions { streaming: row.with(|row| matches!(row, Some(DisplayRow::History(row)) if row.active)), ..Default::default() })
+                    .selectable(true).links(TextViewLinks::Report)
+                    .on_link_press(move |event: &TextViewLinkPressEvent| links.open_link(event.url.to_string()))
+                    .text_color(move || theme().foreground))
+                .child(text(move || row.with(|row| match row {
+                    Some(DisplayRow::Pending(message)) => message.error.clone().unwrap_or_default(),
+                    _ => String::new(),
+                })).text_color(move || theme().muted_foreground))
+                .child(when(move || row.with(|row| matches!(row, Some(DisplayRow::Pending(message)) if matches!(message.status, SendStatus::UnknownOutcome | SendStatus::Rejected))), move || {
+                    let retry = retry.clone();
+                    button().disabled(move || sending.get() || !ready.get()).on_press(move || {
+                        if let Some(DisplayRow::Pending(message)) = row.get_untracked() { retry.retry(message.client_message_id); }
+                    }).p_2().child(text("重试发送"))
+                }))
+        }))
+        .child(when(move || row.with(|row| matches!(row, Some(DisplayRow::Footer(_)))), move || {
+            let footer = computed(move || row.with(|row| match row { Some(DisplayRow::Footer(footer)) => Some(footer.clone()), _ => None }));
+            let state = state.clone();
+            view().test_id("turn-footer").p_3().child(turn_footer::completed(footer, Rc::new(move |footer| state.copy_turn(footer))))
+        }))
+        .child(when(move || row.with(|row| matches!(row, Some(DisplayRow::Running(_)))), move || {
+            let start = computed(move || row.with(|row| match row { Some(DisplayRow::Running(start)) => *start, _ => None }));
+            view().p_3().child(turn_footer::running(start))
+        }))
 }
 
 #[cfg(test)]
@@ -1125,13 +1319,14 @@ mod tests {
     fn provisional_echo_displays_once_without_losing_the_durable_send_identity() {
         let mut transactions = ConversationState::default();
         transactions.begin_send("agent", "client-message", "hello");
-        let rows = display_rows(vec![user(true)], transactions.pending_records());
-        assert_eq!(rows.len(), 1);
+        let rows = display_rows(vec![user(true)], transactions.pending_records(), None);
+        assert_eq!(rows.len(), 2);
         assert!(matches!(&rows[0], DisplayRow::Pending(_)));
+        assert!(matches!(&rows[1], DisplayRow::Running(None)));
         assert_eq!(transactions.pending_records().len(), 1);
         let committed = user(false);
         transactions.observe_user("agent", &committed.item);
-        let rows = display_rows(vec![committed], transactions.pending_records());
+        let rows = display_rows(vec![committed], transactions.pending_records(), None);
         assert_eq!(rows.len(), 1);
         assert!(matches!(&rows[0], DisplayRow::History(_)));
         assert!(transactions.pending_records().is_empty());
