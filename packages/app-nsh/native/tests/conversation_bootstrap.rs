@@ -1,7 +1,7 @@
 //! Real Rust root and WebSocket facade with captured protocol messages and a manual clock.
 
 use nsh_core::{
-    element::{Spawned, spawn, timer},
+    element::{Owner, Spawned, spawn, timer},
     time::Clock,
     websocket::{
         WebSocketData, WebSocketEvent, WebSocketEvents, WebSocketRequest, WebSocketTask,
@@ -40,6 +40,7 @@ struct Transport {
 }
 
 struct Socket {
+    owner: Owner,
     events: Rc<RefCell<WebSocketEvents>>,
     jobs: Vec<Spawned<()>>,
     trace: Arc<Mutex<Trace>>,
@@ -73,14 +74,17 @@ impl Socket {
     fn deliver(&mut self, frame: Value, delay: Duration) {
         let events = self.events.clone();
         let trace = self.trace.clone();
-        self.jobs.push(spawn(async move {
-            if !delay.is_zero() {
-                timer(delay).await;
-            }
-            trace.lock().unwrap().delivered.push(frame.clone());
-            events.borrow_mut()(WebSocketEvent::Message(WebSocketData::Text(
-                frame.to_string(),
-            )));
+        // An incoming network packet outlives the page that sent its corresponding RPC.
+        self.jobs.push(self.owner.run(|| {
+            spawn(async move {
+                if !delay.is_zero() {
+                    timer(delay).await;
+                }
+                trace.lock().unwrap().delivered.push(frame.clone());
+                events.borrow_mut()(WebSocketEvent::Message(WebSocketData::Text(
+                    frame.to_string(),
+                )));
+            })
         }));
     }
 
@@ -224,6 +228,7 @@ impl WebSocketTransport for Transport {
         events: WebSocketEvents,
     ) -> Result<Box<dyn WebSocketTask>, String> {
         let mut socket = Socket {
+            owner: Owner::current(),
             events: Rc::new(RefCell::new(events)),
             jobs: Vec::new(),
             trace: self.trace.clone(),
