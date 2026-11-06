@@ -784,6 +784,10 @@ try {
     await message.fill("");
     await button("返回 Agent 详情").click();
     await button("返回项目列表").click();
+    // The retained host is already visible during the navigation transition; wait for the page to leave.
+    await expect(ui.getByText(`项目：${project.projectDisplayName}`, { exact: true })).toHaveCount(
+      0,
+    );
     await expect(connected).toBeVisible();
     await expect(address).toBeDisabled();
     await disconnect.click();
