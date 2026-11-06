@@ -372,7 +372,7 @@ impl<'de> Deserialize<'de> for Snapshot {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ActiveTurn {
     pub(crate) turn_id: String,
@@ -621,7 +621,7 @@ impl Cancelled {
     }
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Clone)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PermissionKind {
     Tool,
@@ -631,7 +631,7 @@ pub(crate) enum PermissionKind {
     Other,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PermissionRequest {
     pub(crate) id: String,
@@ -656,7 +656,7 @@ pub(crate) struct PermissionRequest {
     pub(crate) extra: Object,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PermissionAction {
     pub(crate) id: String,
@@ -668,20 +668,20 @@ pub(crate) struct PermissionAction {
     pub(crate) intent: Option<ActionIntent>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PermissionBehavior {
     Allow,
     Deny,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ActionVariant {
     Primary,
     Secondary,
     Danger,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ActionIntent {
     Implement,
@@ -689,7 +689,7 @@ pub(crate) enum ActionIntent {
     Dismiss,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "behavior", rename_all = "snake_case")]
 pub(crate) enum PermissionResponse {
     #[serde(rename_all = "camelCase")]
@@ -768,7 +768,7 @@ pub(crate) struct AttentionRequired {
     pub(crate) subscription_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TimelineReplacement {
     pub(crate) agent_id: String,
@@ -831,7 +831,7 @@ pub(crate) struct RpcError {
     pub(crate) code: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Stream {
     pub(crate) agent_id: String,
@@ -849,13 +849,14 @@ fn optional_seq<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error
     safe_integer(d).map(Some)
 }
 
+#[derive(Clone)]
 pub(crate) enum StreamEvent {
     Known(KnownStreamEvent),
     // Never interpreted as completion/acceptance. A newer daemon may add event types.
     Unknown(Value),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum KnownStreamEvent {
     #[serde(rename_all = "camelCase")]
@@ -947,7 +948,7 @@ impl<'de> Deserialize<'de> for StreamEvent {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Usage {
     #[serde(default, deserialize_with = "present")]
@@ -964,20 +965,20 @@ pub(crate) struct Usage {
     pub(crate) context_window_used_tokens: Option<f64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AttentionReason {
     Finished,
     Error,
     Permission,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub(crate) struct Notification {
     pub(crate) title: String,
     pub(crate) body: String,
     pub(crate) data: NotificationData,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NotificationData {
     pub(crate) server_id: String,
@@ -987,6 +988,7 @@ pub(crate) struct NotificationData {
     pub(crate) workspace_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) enum TimelineItem {
     User(TimelineText),
     Assistant(TimelineText),
@@ -997,6 +999,7 @@ pub(crate) enum TimelineItem {
     Unknown(Value),
 }
 
+#[derive(Clone)]
 pub(crate) struct TimelineText {
     pub(crate) text: String,
     pub(crate) message_id: Option<String>,
@@ -1070,7 +1073,7 @@ impl<'de> Deserialize<'de> for TimelineItem {
     }
 }
 
-#[derive(Deserialize, PartialEq, Eq)]
+#[derive(Deserialize, PartialEq, Eq, Clone)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ToolStatus {
     Running,
@@ -1079,7 +1082,7 @@ pub(crate) enum ToolStatus {
     Canceled,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ToolCall {
     pub(crate) call_id: String,
@@ -1095,6 +1098,7 @@ pub(crate) struct ToolCall {
 }
 
 // Critical display fields are checked; other platform/provider-specific detail is kept losslessly.
+#[derive(Clone)]
 pub(crate) struct ToolDetail {
     pub(crate) kind: String,
     pub(crate) fields: Object,

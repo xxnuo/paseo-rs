@@ -1,10 +1,14 @@
 //! Projected history and subscription/catch-up state, independent of transport and rendering.
 
 use crate::protocol::conversation::{
-    Collapse, Direction, History, Projection, Stream, TimelineEntry, TimelineItem,
-    TimelineReplacement, ToolStatus,
+    Collapse, Direction, History, KnownStreamEvent, Projection, Stream, StreamEvent, TimelineEntry,
+    TimelineItem, TimelineReplacement, ToolCall, ToolDetail, ToolStatus,
 };
+use serde_json::Value;
 use std::rc::Rc;
+
+const MAX_BUFFERED_EVENTS: usize = 256;
+const MAX_BUFFERED_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -101,6 +105,8 @@ pub(crate) struct Row {
     pub(crate) sources: Vec<SourceRange>,
     pub(crate) collapsed: Rc<Vec<Collapse>>,
     pub(crate) item: Rc<TimelineItem>,
+    pub(crate) provisional: bool,
+    pub(crate) active: bool,
 }
 
 impl Row {
@@ -113,14 +119,15 @@ impl Row {
     }
 
     fn same_identity(&self, other: &Self) -> bool {
-        if self.epoch != other.epoch
+        if !self.epoch.is_empty() && !other.epoch.is_empty() && self.epoch != other.epoch
             || self.provider != other.provider
-            || self.turn_id != other.turn_id
         {
             return false;
         }
         match (&*self.item, &*other.item) {
-            (TimelineItem::Tool(a), TimelineItem::Tool(b)) => a.call_id == b.call_id,
+            (TimelineItem::Tool(a), TimelineItem::Tool(b)) => {
+                self.turn_id == other.turn_id && a.call_id == b.call_id
+            }
             (TimelineItem::User(a), TimelineItem::User(b)) => {
                 if let (Some(a), Some(b)) = (&a.client_message_id, &b.client_message_id) {
                     a == b
@@ -175,11 +182,25 @@ struct Pending {
     plan: FetchPlan,
     buffer_watermark: u64,
     bootstrap: bool,
+    provisional_rows: Vec<Row>,
 }
 
 struct Buffered {
     arrival: u64,
     event: Stream,
+    row_id: Option<u64>,
+}
+
+struct OverlayBase {
+    rows: Vec<Row>,
+    coverage: Option<Coverage>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    None,
+    After,
+    Tail,
 }
 
 pub(crate) struct Timeline {
@@ -189,6 +210,7 @@ pub(crate) struct Timeline {
     pub(crate) rows: Vec<Row>,
     pub(crate) coverage: Option<Coverage>,
     pub(crate) error: Option<String>,
+    pub(crate) resync_required: bool,
     subscribed: bool,
     network_applied: bool,
     next_id: u64,
@@ -196,6 +218,10 @@ pub(crate) struct Timeline {
     next_arrival: u64,
     pending: Option<Pending>,
     buffered: Vec<Buffered>,
+    buffered_bytes: usize,
+    overlay_base: Option<OverlayBase>,
+    overflow_arrival: u64,
+    completion_arrival: u64,
 }
 
 impl Timeline {
@@ -207,6 +233,7 @@ impl Timeline {
             rows: Vec::new(),
             coverage: None,
             error: None,
+            resync_required: false,
             subscribed: false,
             network_applied: false,
             next_id: 0,
@@ -214,6 +241,10 @@ impl Timeline {
             next_arrival: 0,
             pending: None,
             buffered: Vec::new(),
+            buffered_bytes: 0,
+            overlay_base: None,
+            overflow_arrival: 0,
+            completion_arrival: 0,
         }
     }
 
@@ -250,7 +281,7 @@ impl Timeline {
             return Vec::new();
         }
         self.subscribed = true;
-        vec![self.fetch(self.resume_plan(), true)]
+        vec![self.fetch(self.recovery_plan(), true)]
     }
 
     pub(crate) fn detach(&mut self) {
@@ -261,7 +292,9 @@ impl Timeline {
     }
 
     fn resume_plan(&self) -> FetchPlan {
-        self.coverage
+        self.overlay_base
+            .as_ref()
+            .map_or(&self.coverage, |base| &base.coverage)
             .as_ref()
             .map_or(FetchPlan::Tail, |range| FetchPlan::After(range.end()))
     }
@@ -280,6 +313,12 @@ impl Timeline {
             plan: plan.clone(),
             buffer_watermark: self.next_arrival,
             bootstrap,
+            provisional_rows: self
+                .rows
+                .iter()
+                .filter(|row| row.provisional)
+                .cloned()
+                .collect(),
         });
         Action::Fetch {
             generation: self.generation,
@@ -320,6 +359,11 @@ impl Timeline {
             .pending
             .as_ref()
             .map_or_else(|| self.resume_plan(), |pending| pending.plan.clone());
+        let plan = if self.resync_required {
+            FetchPlan::Tail
+        } else {
+            plan
+        };
         let bootstrap = self
             .pending
             .as_ref()
@@ -334,7 +378,59 @@ impl Timeline {
         }
     }
 
-    /// shortcut: live payloads are buffered, add stream presentation when its reducer is ported.
+    pub(crate) fn history_failed(&mut self, generation: u64, operation_id: &str, error: String) {
+        if generation == self.generation
+            && self.subscribed
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.operation_id == operation_id)
+        {
+            self.status = Status::Failed;
+            self.error = Some(error);
+        }
+    }
+
+    pub(crate) fn refresh(&mut self, generation: u64) -> Vec<Action> {
+        if generation != self.generation || !self.subscribed {
+            return Vec::new();
+        }
+        self.error = None;
+        vec![self.fetch(FetchPlan::Tail, false)]
+    }
+
+    pub(crate) fn catch_up(&mut self, generation: u64) -> Vec<Action> {
+        if generation != self.generation || !self.subscribed {
+            return Vec::new();
+        }
+        self.next_arrival += 1;
+        self.completion_arrival = self.next_arrival;
+        if self.pending.is_some() {
+            return Vec::new();
+        }
+        self.error = None;
+        vec![self.fetch(self.recovery_plan(), false)]
+    }
+
+    fn recovery_plan(&self) -> FetchPlan {
+        let plan = self.resume_plan();
+        let epoch_changed = match &plan {
+            FetchPlan::After(cursor) => self.buffered.iter().any(|buffered| {
+                buffered
+                    .event
+                    .epoch
+                    .as_ref()
+                    .is_some_and(|epoch| *epoch != cursor.epoch)
+            }),
+            _ => false,
+        };
+        if self.resync_required || epoch_changed {
+            FetchPlan::Tail
+        } else {
+            plan
+        }
+    }
+
     pub(crate) fn stream(&mut self, generation: u64, event: Stream) -> Vec<Action> {
         if generation != self.generation
             || event.agent_id != self.agent_id
@@ -342,45 +438,310 @@ impl Timeline {
         {
             return Vec::new();
         }
-        if event
-            .epoch
-            .as_deref()
-            .zip(event.seq)
-            .is_some_and(|(epoch, seq)| {
-                self.coverage
-                    .as_ref()
-                    .is_some_and(|range| range.contains(epoch, seq))
-            })
-        {
-            return Vec::new();
-        }
-        let epoch_changed = event
-            .epoch
-            .as_ref()
-            .zip(self.coverage.as_ref())
-            .is_some_and(|(epoch, range)| *epoch != range.epoch);
         self.next_arrival += 1;
-        self.buffered.push(Buffered {
-            arrival: self.next_arrival,
-            event,
-        });
-        if self.subscribed && self.status != Status::Failed {
-            self.status = Status::CatchingUp;
-        }
-        if !self.subscribed
-            || self.status == Status::Failed
-            || (self.pending.is_some() && !epoch_changed)
-        {
+        let recovery = self.observe(event, self.next_arrival);
+        if !self.subscribed || self.status == Status::Failed || recovery == Recovery::None {
             return Vec::new();
+        }
+        if self.pending.is_some() {
+            self.status = Status::CatchingUp;
+            // An in-flight Tail already owns repair; do not starve it with every live frame.
+            if recovery != Recovery::Tail
+                || self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| matches!(pending.plan, FetchPlan::Tail))
+            {
+                return Vec::new();
+            }
         }
         vec![self.fetch(
-            if epoch_changed {
+            if recovery == Recovery::Tail {
                 FetchPlan::Tail
             } else {
                 self.resume_plan()
             },
             false,
         )]
+    }
+
+    fn ensure_overlay(&mut self) {
+        if self.overlay_base.is_none() {
+            self.overlay_base = Some(OverlayBase {
+                rows: self.rows.clone(),
+                coverage: self.coverage.clone(),
+            });
+        }
+    }
+
+    fn buffer(&mut self, event: Stream, arrival: u64) -> bool {
+        self.ensure_overlay();
+        let size = buffered_size(&event);
+        if self.buffered.len() >= MAX_BUFFERED_EVENTS
+            || size > MAX_BUFFERED_BYTES.saturating_sub(self.buffered_bytes)
+        {
+            self.buffered.clear();
+            self.buffered_bytes = 0;
+            self.resync_required = true;
+            self.overflow_arrival = self.overflow_arrival.max(arrival);
+            return false;
+        }
+        self.buffered_bytes += size;
+        self.buffered.push(Buffered {
+            arrival,
+            event,
+            row_id: None,
+        });
+        true
+    }
+
+    fn observe(&mut self, event: Stream, arrival: u64) -> Recovery {
+        let completion = matches!(
+            &event.event,
+            StreamEvent::Known(
+                KnownStreamEvent::TurnCompleted { .. }
+                    | KnownStreamEvent::TurnFailed { .. }
+                    | KnownStreamEvent::TurnCanceled { .. }
+            )
+        );
+        if completion {
+            self.completion_arrival = arrival;
+            for row in &mut self.rows {
+                row.active = false;
+            }
+            return Recovery::After;
+        }
+        if self.resync_required {
+            self.overflow_arrival = self.overflow_arrival.max(arrival);
+            return Recovery::Tail;
+        }
+        let StreamEvent::Known(KnownStreamEvent::Timeline { .. }) = &event.event else {
+            for row in &mut self.rows {
+                if matches!(&*row.item, TimelineItem::Reasoning(_)) {
+                    row.active = false;
+                }
+            }
+            return if matches!(&event.event, StreamEvent::Unknown(_)) {
+                if self.buffer(event, arrival) {
+                    Recovery::After
+                } else {
+                    Recovery::Tail
+                }
+            } else {
+                Recovery::None
+            };
+        };
+        let position = event.epoch.as_deref().zip(event.seq);
+        let mut provisional = !self.network_applied || position.is_none();
+        if self.network_applied
+            && let Some((epoch, seq)) = position
+        {
+            if let Some(coverage) = &self.coverage {
+                if epoch != coverage.epoch {
+                    self.buffer(event, arrival);
+                    return Recovery::Tail;
+                }
+                if seq <= coverage.contiguous.span.end || coverage.contains(epoch, seq) {
+                    return Recovery::None;
+                }
+                if seq != coverage.contiguous.span.end.saturating_add(1) {
+                    return if self.buffer(event, arrival) {
+                        Recovery::After
+                    } else {
+                        Recovery::Tail
+                    };
+                }
+            } else if seq != 1 {
+                self.buffer(event, arrival);
+                return Recovery::Tail;
+            }
+        }
+        if provisional || self.overlay_base.is_some() {
+            if !self.buffer(event.clone(), arrival) {
+                return Recovery::Tail;
+            }
+            provisional = true;
+        }
+        if self.network_applied
+            && let Some((epoch, seq)) = position
+        {
+            if let Some(coverage) = &mut self.coverage {
+                coverage.extend(Window {
+                    span: SourceRange {
+                        start: seq,
+                        end: seq,
+                    },
+                    has_older: coverage.contiguous.has_older,
+                });
+            } else {
+                self.coverage = Some(Coverage {
+                    epoch: epoch.to_owned(),
+                    contiguous: Window {
+                        span: SourceRange {
+                            start: seq,
+                            end: seq,
+                        },
+                        has_older: false,
+                    },
+                    retained: Vec::new(),
+                });
+            }
+        }
+        let row_id = self.reduce_live(event, provisional);
+        if let Some(buffered) = self
+            .buffered
+            .last_mut()
+            .filter(|buffered| buffered.arrival == arrival)
+        {
+            buffered.row_id = row_id;
+        }
+        Recovery::None
+    }
+
+    fn reduce_live(&mut self, event: Stream, provisional: bool) -> Option<u64> {
+        let StreamEvent::Known(KnownStreamEvent::Timeline {
+            provider,
+            item,
+            turn_id,
+        }) = event.event
+        else {
+            return None;
+        };
+        let reasoning = matches!(&item, TimelineItem::Reasoning(_));
+        for row in &mut self.rows {
+            row.active = false;
+        }
+        let position = event.epoch.as_ref().zip(event.seq);
+        let sources = position.map_or_else(Vec::new, |(_, seq)| {
+            vec![SourceRange {
+                start: seq,
+                end: seq,
+            }]
+        });
+        self.next_id += 1;
+        let mut incoming = Row {
+            id: self.next_id,
+            epoch: event.epoch.unwrap_or_default(),
+            provider,
+            turn_id,
+            timestamp: event.timestamp,
+            span: sources
+                .first()
+                .copied()
+                .unwrap_or(SourceRange { start: 0, end: 0 }),
+            sources,
+            collapsed: Rc::new(Vec::new()),
+            item: Rc::new(item),
+            provisional,
+            active: true,
+        };
+        let match_index = match &*incoming.item {
+            TimelineItem::Assistant(text) | TimelineItem::Reasoning(text) => {
+                let chunk = text.text.replace('\r', "");
+                if chunk.is_empty() {
+                    return None;
+                }
+                let matches_row = |index: usize| {
+                    let row = &self.rows[index];
+                    row.provider == incoming.provider
+                        && compatible_turn(row, &incoming)
+                        && match (&*row.item, &*incoming.item) {
+                            (TimelineItem::Assistant(old), TimelineItem::Assistant(new)) => {
+                                new.message_id.is_none() || old.message_id == new.message_id
+                            }
+                            (TimelineItem::Reasoning(_), TimelineItem::Reasoning(_)) => {
+                                row.turn_id == incoming.turn_id
+                            }
+                            _ => false,
+                        }
+                };
+                let index = self
+                    .rows
+                    .len()
+                    .checked_sub(1)
+                    .filter(|&index| matches_row(index))
+                    .or_else(|| {
+                        (!reasoning
+                            && self
+                                .rows
+                                .last()
+                                .is_some_and(|row| matches!(&*row.item, TimelineItem::User(_))))
+                        .then(|| {
+                            self.rows
+                                .len()
+                                .checked_sub(2)
+                                .filter(|&index| matches_row(index))
+                        })
+                        .flatten()
+                    });
+                if index.is_none() && chunk.trim().is_empty() {
+                    return None;
+                }
+                let mut text = text.clone();
+                text.text = chunk;
+                incoming.item = Rc::new(if reasoning {
+                    TimelineItem::Reasoning(text)
+                } else {
+                    TimelineItem::Assistant(text)
+                });
+                index
+            }
+            TimelineItem::User(text) => {
+                let normalized = text.text.replace('\r', "");
+                if normalized.trim().is_empty() {
+                    return None;
+                }
+                let index = self
+                    .rows
+                    .iter()
+                    .position(|row| user_identity(row, &incoming));
+                let mut text = text.clone();
+                text.text = normalized;
+                incoming.item = Rc::new(TimelineItem::User(text));
+                index
+            }
+            TimelineItem::Tool(_) => self
+                .rows
+                .iter()
+                .position(|row| row.same_identity(&incoming)),
+            _ => None,
+        };
+        if let Some(index) = match_index {
+            let previous = &self.rows[index];
+            incoming.id = previous.id;
+            if incoming.epoch.is_empty() {
+                incoming.epoch = previous.epoch.clone();
+            }
+            incoming.provisional |= previous.provisional;
+            incoming.sources = merge_sources(&previous.sources, &incoming.sources);
+            incoming.span = span(&incoming.sources).unwrap_or(previous.span);
+            match (&*previous.item, &*incoming.item) {
+                (TimelineItem::Assistant(old), TimelineItem::Assistant(new))
+                | (TimelineItem::Reasoning(old), TimelineItem::Reasoning(new)) => {
+                    let mut text = new.clone();
+                    text.text = format!("{}{}", old.text, new.text);
+                    text.message_id = text.message_id.or_else(|| old.message_id.clone());
+                    incoming.item = Rc::new(if reasoning {
+                        TimelineItem::Reasoning(text)
+                    } else {
+                        TimelineItem::Assistant(text)
+                    });
+                }
+                (TimelineItem::Tool(old), TimelineItem::Tool(new)) => {
+                    incoming.item = Rc::new(TimelineItem::Tool(merge_tool(old, new)))
+                }
+                _ => {}
+            }
+            incoming.active = live_active(&incoming.item);
+            let id = incoming.id;
+            self.rows[index] = incoming;
+            Some(id)
+        } else {
+            incoming.active = live_active(&incoming.item);
+            let id = incoming.id;
+            self.rows.push(incoming);
+            Some(id)
+        }
     }
 
     pub(crate) fn buffered_events(&self) -> impl Iterator<Item = &Stream> {
@@ -426,8 +787,11 @@ impl Timeline {
         }
         let pending = self.pending.take().expect("matched pending request");
         let before = matches!(pending.plan, FetchPlan::Before { .. });
-        let epoch_changed = self
-            .coverage
+        let current_coverage = self
+            .overlay_base
+            .as_ref()
+            .map_or_else(|| self.coverage.clone(), |base| base.coverage.clone());
+        let epoch_changed = current_coverage
             .as_ref()
             .is_some_and(|range| range.epoch != history.epoch);
         if (history.reset || history.stale_cursor || history.gap || epoch_changed)
@@ -447,7 +811,7 @@ impl Timeline {
                 },
                 has_older: history.has_older,
             });
-        if let (Some(range), Some(page)) = (&self.coverage, &page)
+        if let (Some(range), Some(page)) = (&current_coverage, &page)
             && !matches!(pending.plan, FetchPlan::Tail)
         {
             let disconnected = if before {
@@ -472,6 +836,11 @@ impl Timeline {
             self.status = Status::Failed;
             self.error = Some("Timeline catch-up did not advance its cursor".into());
             return Vec::new();
+        }
+        let previous_rows = self.overlay_base.as_ref().map(|_| self.rows.clone());
+        if let Some(base) = self.overlay_base.take() {
+            self.rows = base.rows;
+            self.coverage = base.coverage;
         }
         if matches!(pending.plan, FetchPlan::Tail) {
             let rewound = self
@@ -501,6 +870,20 @@ impl Timeline {
                                 .is_none_or(|seq| seq <= history.window.max_seq))
             });
         }
+        let base_end = current_coverage
+            .as_ref()
+            .map_or(0, |range| range.contiguous.span.end);
+        let acknowledged_rows: std::collections::HashSet<u64> = pending
+            .provisional_rows
+            .iter()
+            .filter(|row| {
+                history
+                    .entries
+                    .iter()
+                    .any(|entry| entry_covers_row(entry, row, base_end))
+            })
+            .map(|row| row.id)
+            .collect();
         for entry in history.entries {
             // Older projected daemons may return rows owned by the next before page.
             if before
@@ -526,24 +909,40 @@ impl Timeline {
         }
         self.network_applied = true;
         self.error = None;
-        if before {
-            // Loading older rows cannot acknowledge a forward catch-up.
-            if !self.buffered.is_empty() {
-                return vec![self.fetch(self.resume_plan(), false)];
+        if !before {
+            self.buffered.retain(|buffered| {
+                match (buffered.event.epoch.as_deref(), buffered.event.seq) {
+                    (Some(epoch), Some(seq)) => !self
+                        .coverage
+                        .as_ref()
+                        .is_some_and(|range| range.contains(epoch, seq)),
+                    _ => {
+                        buffered.arrival > pending.buffer_watermark
+                            || buffered
+                                .row_id
+                                .is_some_and(|id| !acknowledged_rows.contains(&id))
+                    }
+                }
+            });
+            if !history.has_newer && self.overflow_arrival <= pending.buffer_watermark {
+                self.resync_required = false;
             }
-            self.status = Status::Current;
-            return Vec::new();
         }
-        self.buffered.retain(|buffered| {
-            match (buffered.event.epoch.as_deref(), buffered.event.seq) {
-                (Some(epoch), Some(seq)) => !self
-                    .coverage
-                    .as_ref()
-                    .is_some_and(|range| range.contains(epoch, seq)),
-                _ => buffered.arrival > pending.buffer_watermark,
+        let remaining = std::mem::take(&mut self.buffered);
+        self.buffered_bytes = 0;
+        let mut recovery = Recovery::None;
+        for buffered in remaining {
+            match self.observe(buffered.event, buffered.arrival) {
+                Recovery::Tail => recovery = Recovery::Tail,
+                Recovery::After if recovery != Recovery::Tail => recovery = Recovery::After,
+                _ => {}
             }
-        });
-        if !history.has_newer
+        }
+        if let Some(previous) = previous_rows {
+            self.restore_row_ids(&previous);
+        }
+        if !before
+            && !history.has_newer
             && self.buffered.iter().any(|buffered| {
                 buffered.arrival <= pending.buffer_watermark
                     && buffered.event.epoch.as_deref() == Some(history.epoch.as_str())
@@ -558,29 +957,38 @@ impl Timeline {
             self.error = Some("Timeline snapshot did not reach the buffered events".into());
             return Vec::new();
         }
-        if history.has_newer
+        let owed_completion = self.completion_arrival > pending.buffer_watermark;
+        if self.completion_arrival > 0
+            && self
+                .buffered
+                .iter()
+                .all(|buffered| buffered.arrival <= self.completion_arrival)
+        {
+            for row in &mut self.rows {
+                row.active = false;
+            }
+        }
+        if !owed_completion {
+            self.completion_arrival = 0;
+        }
+        if !before && history.has_newer
             || pending.bootstrap
                 && matches!(pending.plan, FetchPlan::Tail)
                 && self.coverage.is_some()
-            || !self.buffered.is_empty()
-            || self.coverage.as_ref().is_some_and(|range| {
-                range
-                    .retained
-                    .iter()
-                    .any(|window| window.span.start > range.contiguous.span.end)
-            })
-        {
-            let epoch_pending = self.coverage.as_ref().is_some_and(|range| {
-                self.buffered.iter().any(|buffered| {
-                    buffered
-                        .event
-                        .epoch
-                        .as_ref()
-                        .is_some_and(|epoch| *epoch != range.epoch)
+            || pending.bootstrap && !self.buffered.is_empty()
+            || recovery != Recovery::None
+            || self.resync_required
+            || owed_completion
+            || !before
+                && self.coverage.as_ref().is_some_and(|range| {
+                    range
+                        .retained
+                        .iter()
+                        .any(|window| window.span.start > range.contiguous.span.end)
                 })
-            });
+        {
             return vec![self.fetch(
-                if epoch_pending {
+                if recovery == Recovery::Tail {
                     FetchPlan::Tail
                 } else {
                     self.resume_plan()
@@ -590,6 +998,31 @@ impl Timeline {
         }
         self.status = Status::Current;
         Vec::new()
+    }
+
+    fn restore_row_ids(&mut self, previous: &[Row]) {
+        let mut used = std::collections::HashSet::new();
+        let mut reassigned = std::collections::HashMap::new();
+        for row in &mut self.rows {
+            let generated = row.id;
+            if let Some(old) = previous
+                .iter()
+                .find(|old| !used.contains(&old.id) && presentation_match(old, row))
+            {
+                row.id = old.id;
+            }
+            if !used.insert(row.id) {
+                self.next_id += 1;
+                row.id = self.next_id;
+                used.insert(row.id);
+            }
+            reassigned.insert(generated, row.id);
+        }
+        for buffered in &mut self.buffered {
+            if let Some(id) = buffered.row_id.and_then(|id| reassigned.get(&id)) {
+                buffered.row_id = Some(*id);
+            }
+        }
     }
 
     fn merge_entry(&mut self, epoch: &str, entry: TimelineEntry) {
@@ -622,6 +1055,8 @@ impl Timeline {
             sources,
             collapsed: Rc::new(entry.collapsed),
             item: Rc::new(entry.item),
+            provisional: false,
+            active: false,
         };
         let mut retained_newer = None;
         self.rows.retain(|row| {
@@ -629,16 +1064,269 @@ impl Timeline {
                 return true;
             }
             incoming.id = incoming.id.min(row.id);
-            let terminal_tool = matches!((&*row.item, &*incoming.item),
-                (TimelineItem::Tool(old), TimelineItem::Tool(new))
-                    if old.status != ToolStatus::Running && new.status == ToolStatus::Running);
-            if row.span.end > incoming.span.end || terminal_tool {
+            if let (TimelineItem::Tool(old), TimelineItem::Tool(new)) =
+                (&*row.item, &*incoming.item)
+            {
+                incoming.item = Rc::new(TimelineItem::Tool(merge_tool(old, new)));
+                incoming.sources = merge_sources(&row.sources, &incoming.sources);
+                incoming.span = span(&incoming.sources).unwrap_or(incoming.span);
+                return false;
+            }
+            if row.span.end > incoming.span.end {
                 retained_newer = Some(row.clone());
             }
             false
         });
         self.rows.push(retained_newer.unwrap_or(incoming));
     }
+}
+
+fn compatible_turn(left: &Row, right: &Row) -> bool {
+    left.turn_id.is_none() || right.turn_id.is_none() || left.turn_id == right.turn_id
+}
+
+fn live_active(item: &TimelineItem) -> bool {
+    matches!(
+        item,
+        TimelineItem::Assistant(_) | TimelineItem::Reasoning(_)
+    ) || matches!(item, TimelineItem::Tool(tool) if tool.status == ToolStatus::Running)
+}
+
+fn user_identity(left: &Row, right: &Row) -> bool {
+    if left.provider != right.provider
+        || !left.epoch.is_empty() && !right.epoch.is_empty() && left.epoch != right.epoch
+    {
+        return false;
+    }
+    match (&*left.item, &*right.item) {
+        (TimelineItem::User(a), TimelineItem::User(b)) => {
+            if let (Some(a), Some(b)) = (&a.client_message_id, &b.client_message_id) {
+                a == b
+            } else {
+                a.message_id
+                    .as_ref()
+                    .zip(b.message_id.as_ref())
+                    .is_some_and(|(a, b)| a == b)
+            }
+        }
+        _ => false,
+    }
+}
+
+fn presentation_match(left: &Row, right: &Row) -> bool {
+    if left.intersects(right) || user_identity(left, right) || left.same_identity(right) {
+        return true;
+    }
+    if left.provider != right.provider || !compatible_turn(left, right) {
+        return false;
+    }
+    match (&*left.item, &*right.item) {
+        (TimelineItem::Assistant(a), TimelineItem::Assistant(b))
+        | (TimelineItem::Reasoning(a), TimelineItem::Reasoning(b)) => {
+            (a.message_id.is_none() || b.message_id.is_none() || a.message_id == b.message_id)
+                && (a.text.starts_with(&b.text) || b.text.starts_with(&a.text))
+        }
+        _ => false,
+    }
+}
+
+fn entry_covers_row(entry: &TimelineEntry, row: &Row, base_end: u64) -> bool {
+    if entry.provider != row.provider
+        || entry
+            .turn_id
+            .as_ref()
+            .zip(row.turn_id.as_ref())
+            .is_some_and(|(a, b)| a != b)
+    {
+        return false;
+    }
+    match (&entry.item, &*row.item) {
+        (TimelineItem::Assistant(canonical), TimelineItem::Assistant(live))
+        | (TimelineItem::Reasoning(canonical), TimelineItem::Reasoning(live)) => {
+            if canonical
+                .message_id
+                .as_ref()
+                .zip(live.message_id.as_ref())
+                .is_some_and(|(a, b)| a != b)
+            {
+                return false;
+            }
+            canonical.text.starts_with(&live.text)
+                || entry.seq_end > base_end
+                    && row.sources.iter().any(|source| {
+                        entry.source_seq_ranges.iter().any(|range| {
+                            source.overlaps(SourceRange {
+                                start: range.start_seq,
+                                end: range.end_seq,
+                            })
+                        })
+                    })
+        }
+        (TimelineItem::User(canonical), TimelineItem::User(live)) => {
+            if let (Some(a), Some(b)) = (&canonical.client_message_id, &live.client_message_id) {
+                a == b
+            } else {
+                canonical
+                    .message_id
+                    .as_ref()
+                    .zip(live.message_id.as_ref())
+                    .is_some_and(|(a, b)| a == b)
+            }
+        }
+        (TimelineItem::Tool(canonical), TimelineItem::Tool(live)) => {
+            canonical.call_id == live.call_id
+                && merge_tool(live, canonical).status == canonical.status
+        }
+        (TimelineItem::Unknown(canonical), TimelineItem::Unknown(live))
+        | (TimelineItem::OtherKnown(canonical), TimelineItem::OtherKnown(live)) => {
+            canonical == live
+        }
+        _ => false,
+    }
+}
+
+fn merge_sources(left: &[SourceRange], right: &[SourceRange]) -> Vec<SourceRange> {
+    let mut ranges = [left, right].concat();
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<SourceRange> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end.saturating_add(1)
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
+fn span(ranges: &[SourceRange]) -> Option<SourceRange> {
+    Some(SourceRange {
+        start: ranges.iter().map(|range| range.start).min()?,
+        end: ranges.iter().map(|range| range.end).max()?,
+    })
+}
+
+fn merge_tool(existing: &ToolCall, incoming: &ToolCall) -> ToolCall {
+    let mut merged = incoming.clone();
+    merged.status = match (&existing.status, &incoming.status) {
+        (ToolStatus::Failed, _) | (_, ToolStatus::Failed) => ToolStatus::Failed,
+        (ToolStatus::Canceled, _) => ToolStatus::Canceled,
+        (ToolStatus::Completed, _) => ToolStatus::Completed,
+        (_, ToolStatus::Canceled) => ToolStatus::Canceled,
+        (_, ToolStatus::Completed) => ToolStatus::Completed,
+        _ => ToolStatus::Running,
+    };
+    merged.error = if merged.status == ToolStatus::Failed {
+        if !incoming.error.is_null() {
+            incoming.error.clone()
+        } else {
+            existing.error.clone()
+        }
+    } else {
+        Value::Null
+    };
+    merged.detail = merge_detail(&existing.detail, &incoming.detail);
+    let mut metadata = existing.metadata.clone().unwrap_or_default();
+    metadata.extend(incoming.metadata.clone().unwrap_or_default());
+    merged.metadata = if metadata.is_empty() {
+        None
+    } else {
+        Some(metadata)
+    };
+    let mut extra = existing.extra.clone();
+    extra.extend(incoming.extra.clone());
+    merged.extra = extra;
+    merged
+}
+
+fn merge_detail(existing: &ToolDetail, incoming: &ToolDetail) -> ToolDetail {
+    if incoming.kind == "unknown" && existing.kind != "unknown" {
+        return existing.clone();
+    }
+    if incoming.kind != existing.kind {
+        return incoming.clone();
+    }
+    let mut merged = existing.clone();
+    for (key, value) in &incoming.fields {
+        if incoming.kind == "unknown" && matches!(key.as_str(), "input" | "output") {
+            let previous = existing.fields.get(key);
+            if value.is_null()
+                || previous.is_some_and(|old| old.as_object().is_some_and(|map| !map.is_empty()))
+                    && value.as_object().is_none_or(|map| map.is_empty())
+            {
+                continue;
+            }
+        }
+        merged.fields.insert(key.clone(), value.clone());
+    }
+    merged
+}
+
+fn value_size(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        Value::Array(items) => items
+            .iter()
+            .fold(32usize, |size, item| size.saturating_add(value_size(item))),
+        Value::Object(fields) => fields.iter().fold(32usize, |size, (key, value)| {
+            size.saturating_add(key.len())
+                .saturating_add(value_size(value))
+        }),
+        _ => 16,
+    }
+}
+
+fn buffered_size(event: &Stream) -> usize {
+    let payload = match &event.event {
+        StreamEvent::Unknown(value) => value_size(value),
+        StreamEvent::Known(KnownStreamEvent::Timeline {
+            item,
+            provider,
+            turn_id,
+        }) => {
+            let size = match item {
+                TimelineItem::User(text)
+                | TimelineItem::Assistant(text)
+                | TimelineItem::Reasoning(text) => text
+                    .text
+                    .len()
+                    .saturating_add(text.message_id.as_ref().map_or(0, String::len))
+                    .saturating_add(text.client_message_id.as_ref().map_or(0, String::len))
+                    .saturating_add(text.extra.iter().fold(0usize, |size, (key, value)| {
+                        size.saturating_add(key.len())
+                            .saturating_add(value_size(value))
+                    })),
+                TimelineItem::Tool(tool) => tool
+                    .call_id
+                    .len()
+                    .saturating_add(tool.name.len())
+                    .saturating_add(
+                        tool.detail
+                            .fields
+                            .iter()
+                            .chain(tool.extra.iter())
+                            .chain(tool.metadata.iter().flat_map(|metadata| metadata.iter()))
+                            .fold(0usize, |size, (key, value)| {
+                                size.saturating_add(key.len())
+                                    .saturating_add(value_size(value))
+                            }),
+                    )
+                    .saturating_add(value_size(&tool.error)),
+                TimelineItem::Unknown(value) | TimelineItem::OtherKnown(value) => value_size(value),
+            };
+            size.saturating_add(provider.len())
+                .saturating_add(turn_id.as_ref().map_or(0, String::len))
+        }
+        _ => 0,
+    };
+    payload
+        .saturating_add(event.agent_id.len())
+        .saturating_add(event.timestamp.len())
+        .saturating_add(event.epoch.as_ref().map_or(0, String::len))
+        .saturating_add(event.subscription_id.as_ref().map_or(0, String::len))
+        .saturating_add(128)
 }
 
 fn valid_history(history: &History) -> bool {
@@ -773,6 +1461,39 @@ mod tests {
             value["seq"] = json!(seq);
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    fn live(item: Value, seq: Option<u64>) -> Stream {
+        let mut value = json!({"agentId":"agent","epoch":"epoch","timestamp":"2026-11-06T00:00:00.000Z",
+            "event":{"type":"timeline","provider":"mock","item":item}});
+        if let Some(seq) = seq {
+            value["seq"] = json!(seq);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn delta(text: &str, seq: Option<u64>) -> Stream {
+        live(
+            json!({"type":"assistant_message","text":text,"messageId":"answer"}),
+            seq,
+        )
+    }
+
+    fn finish() -> Stream {
+        serde_json::from_value(
+            json!({"agentId":"agent","timestamp":"2026-11-06T00:00:00.000Z",
+            "event":{"type":"turn_completed","provider":"mock"}}),
+        )
+        .unwrap()
+    }
+
+    fn user(seq: u64) -> Value {
+        entry(
+            seq,
+            seq,
+            json!({"type":"user_message","text":"prompt","clientMessageId":"prompt"}),
+            &[(seq, seq)],
+        )
     }
 
     fn text(row: &Row) -> &str {
@@ -1087,7 +1808,7 @@ mod tests {
                 );
             }
         }
-        assert!(timeline.rows.is_empty());
+        assert_eq!(timeline.rows.len(), 3);
         let action = timeline.subscribed(generation).remove(0);
         let value = capture
             .iter()
@@ -1221,5 +1942,357 @@ mod tests {
         );
         assert_eq!(legacy.rows.len(), 1);
         assert_eq!(legacy.rows[0].id, legacy_id);
+    }
+
+    #[test]
+    fn committed_chunks_render_immediately_and_only_contiguous_sequences_advance() {
+        // session-stream-reducers.ts sequencing gate; agent-manager.test.ts committed coalescer.
+        let mut timeline = current(vec![user(1)], 1);
+        assert!(
+            timeline
+                .stream(timeline.generation, delta("Hel", Some(2)))
+                .is_empty()
+        );
+        let id = timeline.rows[1].id;
+        assert_eq!(text(&timeline.rows[1]), "Hel");
+        assert!(!timeline.rows[1].provisional);
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 2);
+        assert!(
+            timeline
+                .stream(timeline.generation, delta("Hel", Some(2)))
+                .is_empty()
+        );
+        assert_eq!(text(&timeline.rows[1]), "Hel");
+        assert!(
+            timeline
+                .stream(timeline.generation, delta("lo\r", Some(3)))
+                .is_empty()
+        );
+        assert_eq!(text(&timeline.rows[1]), "Hello");
+        assert_eq!(timeline.rows[1].id, id);
+        for (seq, chunk) in [(4, "Thi"), (5, "nk")] {
+            assert!(
+                timeline
+                    .stream(
+                        timeline.generation,
+                        live(json!({"type":"reasoning","text":chunk}), Some(seq))
+                    )
+                    .is_empty()
+            );
+        }
+        assert_eq!(text(&timeline.rows[2]), "Think");
+        assert!(timeline.rows[2].active);
+        timeline.stream(timeline.generation, delta("reply", Some(6)));
+        assert!(!timeline.rows[2].active);
+        assert_eq!(text(&timeline.rows[3]), "reply");
+        let action = timeline.stream(timeline.generation, finish()).remove(0);
+        assert!(
+            matches!(&action, Action::Fetch { plan: FetchPlan::After(cursor), .. } if cursor.seq == 6)
+        );
+        assert!(timeline.rows.iter().all(|row| !row.active));
+        let mut response = page(&action, "epoch", None, None, vec![]);
+        response.window.max_seq = 6;
+        response.window.next_seq = 7;
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(timeline.status, Status::Current);
+    }
+
+    #[test]
+    fn live_tool_lifecycle_does_not_merge_assistant_segments_or_regress_terminal_state() {
+        // session-stream-reducers.test.ts:732,950,1933 and stream.ts mergeToolCallDetail.
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(timeline.generation, delta("before", Some(2)));
+        timeline.stream(
+            timeline.generation,
+            live(tool(3, 3, "running", &[(3, 3)])["item"].clone(), Some(3)),
+        );
+        timeline.stream(timeline.generation, delta("after", Some(4)));
+        let mut completion = tool(5, 5, "completed", &[(5, 5)])["item"].clone();
+        completion["metadata"] = json!({"result":"retained"});
+        timeline.stream(timeline.generation, live(completion, Some(5)));
+        timeline.stream(timeline.generation, delta(" tool", Some(6)));
+        let mut running = tool(7, 7, "running", &[(7, 7)])["item"].clone();
+        running["detail"] = json!({"type":"unknown","input":{},"output":null});
+        timeline.stream(timeline.generation, live(running, Some(7)));
+        assert_eq!(timeline.rows.len(), 4);
+        assert_eq!(text(&timeline.rows[1]), "before");
+        assert_eq!(text(&timeline.rows[3]), "after tool");
+        assert_eq!(
+            timeline.rows[3].sources,
+            vec![
+                SourceRange { start: 4, end: 4 },
+                SourceRange { start: 6, end: 6 }
+            ]
+        );
+        assert!(
+            matches!(&*timeline.rows[2].item, TimelineItem::Tool(tool) if tool.status == ToolStatus::Completed
+            && tool.detail.kind == "read" && tool.metadata.as_ref().unwrap()["result"] == "retained")
+        );
+        let mut failed = tool(8, 8, "completed", &[(8, 8)])["item"].clone();
+        failed["status"] = json!("failed");
+        failed["error"] = json!({"message":"failed"});
+        timeline.stream(timeline.generation, live(failed, Some(8)));
+        assert!(
+            matches!(&*timeline.rows[2].item, TimelineItem::Tool(tool) if tool.status == ToolStatus::Failed && !tool.error.is_null())
+        );
+    }
+
+    #[test]
+    fn provisional_text_is_rebased_onto_authoritative_history_without_replaying_its_prefix() {
+        // replica.test.ts overlapping projection; session-stream-reducers.test.ts:1964.
+        let mut timeline = current(vec![user(1)], 1);
+        assert!(
+            timeline
+                .stream(timeline.generation, delta("Hel", None))
+                .is_empty()
+        );
+        timeline.stream(timeline.generation, delta("lo", None));
+        let id = timeline.rows[1].id;
+        assert_eq!(text(&timeline.rows[1]), "Hello");
+        assert!(timeline.rows[1].provisional);
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 1);
+        let action = timeline.catch_up(timeline.generation).remove(0);
+        timeline.stream(timeline.generation, delta("!", None));
+        let response = page(
+            &action,
+            "epoch",
+            Some(2),
+            Some(3),
+            vec![assistant(2, 3, "Hello")],
+        );
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(text(&timeline.rows[1]), "Hello!");
+        assert_eq!(timeline.rows[1].id, id);
+        assert_eq!(timeline.rows.len(), 2);
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 3);
+        let action = timeline.stream(timeline.generation, finish()).remove(0);
+        let response = page(
+            &action,
+            "epoch",
+            Some(4),
+            Some(4),
+            vec![assistant(2, 4, "Hello!")],
+        );
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(text(&timeline.rows[1]), "Hello!");
+        assert_eq!(timeline.rows[1].id, id);
+        assert!(!timeline.rows[1].provisional);
+        assert_eq!(timeline.buffered_events().count(), 0);
+    }
+
+    #[test]
+    fn committed_updates_during_a_provisional_overlay_and_fetch_are_replayed_in_sequence() {
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(timeline.generation, delta("provisional ", None));
+        timeline.stream(timeline.generation, delta("committed ", Some(2)));
+        let action = timeline.catch_up(timeline.generation).remove(0);
+        assert!(
+            matches!(&action, Action::Fetch { plan: FetchPlan::After(cursor), .. } if cursor.seq == 1)
+        );
+        timeline.stream(timeline.generation, delta("later", Some(3)));
+        assert_eq!(text(&timeline.rows[1]), "provisional committed later");
+        let response = page(
+            &action,
+            "epoch",
+            Some(2),
+            Some(2),
+            vec![assistant(2, 2, "committed ")],
+        );
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(text(&timeline.rows[1]), "committed later");
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 3);
+        assert_eq!(timeline.buffered_events().count(), 0);
+        assert!(!timeline.rows[1].provisional);
+    }
+
+    #[test]
+    fn committed_gap_is_parked_until_history_connects_it_and_epoch_change_requires_tail() {
+        let mut timeline = current(vec![assistant(1, 2, "AB")], 2);
+        let action = timeline
+            .stream(timeline.generation, delta("D", Some(4)))
+            .remove(0);
+        assert_eq!(text(&timeline.rows[0]), "AB");
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 2);
+        let response = page(
+            &action,
+            "epoch",
+            Some(3),
+            Some(3),
+            vec![assistant(1, 3, "ABC")],
+        );
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(text(&timeline.rows[0]), "ABCD");
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 4);
+        let mut next_epoch = delta("new epoch", Some(1));
+        next_epoch.epoch = Some("new-epoch".into());
+        let action = timeline.stream(timeline.generation, next_epoch).remove(0);
+        assert!(matches!(
+            action,
+            Action::Fetch {
+                plan: FetchPlan::Tail,
+                ..
+            }
+        ));
+        assert_eq!(text(&timeline.rows[0]), "ABCD");
+        let mut response = page(
+            &action,
+            "new-epoch",
+            Some(1),
+            Some(1),
+            vec![assistant(1, 1, "new epoch")],
+        );
+        response.reset = true;
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(timeline.rows.len(), 1);
+        assert_eq!(text(&timeline.rows[0]), "new epoch");
+        assert_eq!(timeline.coverage.as_ref().unwrap().epoch, "new-epoch");
+    }
+
+    #[test]
+    fn bounded_buffer_requires_resync_and_keeps_displayed_history_on_overflow() {
+        let mut timeline = current(vec![user(1)], 1);
+        for _ in 0..MAX_BUFFERED_EVENTS {
+            assert!(
+                timeline
+                    .stream(timeline.generation, delta("x", None))
+                    .is_empty()
+            );
+        }
+        let rendered = text(&timeline.rows[1]).to_owned();
+        let action = timeline
+            .stream(timeline.generation, delta("overflow", None))
+            .remove(0);
+        assert!(matches!(
+            action,
+            Action::Fetch {
+                plan: FetchPlan::Tail,
+                ..
+            }
+        ));
+        assert!(timeline.resync_required);
+        assert_eq!(timeline.buffered_events().count(), 0);
+        assert_eq!(text(&timeline.rows[1]), rendered);
+        assert_eq!(timeline.rows.len(), 2);
+        assert!(
+            timeline
+                .stream(timeline.generation, delta("during fetch", None))
+                .is_empty()
+        );
+        let response = page(
+            &action,
+            "epoch",
+            Some(1),
+            Some(2),
+            vec![user(1), assistant(2, 2, "authoritative")],
+        );
+        let after = apply(&mut timeline, &action, response).remove(0);
+        assert!(timeline.resync_required);
+        assert_eq!(timeline.rows.len(), 2);
+        assert_eq!(text(&timeline.rows[1]), "authoritative");
+        let mut response = page(&after, "epoch", None, None, vec![]);
+        response.window.max_seq = 2;
+        response.window.next_seq = 3;
+        assert!(apply(&mut timeline, &after, response).is_empty());
+        assert!(!timeline.resync_required);
+        assert_eq!(timeline.status, Status::Current);
+
+        let mut timeline = current(vec![user(1)], 1);
+        let oversized = "x".repeat(MAX_BUFFERED_BYTES + 1);
+        assert!(matches!(
+            timeline.stream(timeline.generation, delta(&oversized, None))[0],
+            Action::Fetch {
+                plan: FetchPlan::Tail,
+                ..
+            }
+        ));
+        assert_eq!(timeline.rows.len(), 1);
+        assert!(timeline.resync_required);
+        assert_eq!(timeline.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn rpc_failures_refresh_and_turn_completion_respect_operation_and_generation_ownership() {
+        let mut timeline = current(vec![user(1)], 1);
+        let old = timeline.refresh(timeline.generation).remove(0);
+        let newer = timeline.refresh(timeline.generation).remove(0);
+        let Action::Fetch {
+            operation_id: old_id,
+            ..
+        } = &old
+        else {
+            panic!("not a fetch")
+        };
+        let Action::Fetch { operation_id, .. } = &newer else {
+            panic!("not a fetch")
+        };
+        timeline.history_failed(timeline.generation, old_id, "late error".into());
+        assert_eq!(timeline.status, Status::CatchingUp);
+        timeline.history_failed(timeline.generation, operation_id, "network error".into());
+        assert_eq!(timeline.status, Status::Failed);
+        assert_eq!(timeline.rows.len(), 1);
+        let retry = timeline.retry().remove(0);
+        assert!(timeline.stream(timeline.generation, finish()).is_empty());
+        let response = page(&retry, "epoch", Some(1), Some(1), vec![user(1)]);
+        let after = apply(&mut timeline, &retry, response).remove(0);
+        assert!(matches!(
+            after,
+            Action::Fetch {
+                plan: FetchPlan::After(_),
+                ..
+            }
+        ));
+        let old_generation = timeline.generation;
+        timeline.detach();
+        assert!(timeline.refresh(old_generation).is_empty());
+        assert!(timeline.catch_up(old_generation).is_empty());
+        timeline.history_failed(old_generation, operation_id, "detached".into());
+        assert_eq!(timeline.status, Status::Detached);
+    }
+
+    #[test]
+    fn live_unknown_timeline_items_are_preserved_and_user_echoes_use_client_identity() {
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(
+            timeline.generation,
+            live(json!({"type":"future_item","private":"kept"}), Some(2)),
+        );
+        assert!(
+            matches!(&*timeline.rows[1].item, TimelineItem::Unknown(value) if value["private"] == "kept")
+        );
+        timeline.stream(timeline.generation, live(json!({"type":"user_message","text":"prompt","messageId":"provider","clientMessageId":"prompt"}), Some(3)));
+        assert_eq!(timeline.rows.len(), 2);
+        assert!(
+            matches!(&*timeline.rows[0].item, TimelineItem::User(user) if user.message_id.as_deref() == Some("provider"))
+        );
+        assert_eq!(
+            timeline.rows[0].sources,
+            vec![
+                SourceRange { start: 1, end: 1 },
+                SourceRange { start: 3, end: 3 }
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_catch_up_page_cannot_acknowledge_or_discard_unpersisted_live_text() {
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(timeline.generation, delta("still streaming", None));
+        let id = timeline.rows[1].id;
+        let action = timeline.catch_up(timeline.generation).remove(0);
+        let mut response = page(&action, "epoch", None, None, vec![]);
+        response.window.max_seq = 1;
+        response.window.next_seq = 2;
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(text(&timeline.rows[1]), "still streaming");
+        assert_eq!(timeline.rows[1].id, id);
+        assert!(timeline.rows[1].provisional);
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 1);
+        let action = timeline.stream(timeline.generation, finish()).remove(0);
+        let mut response = page(&action, "epoch", None, None, vec![]);
+        response.window.max_seq = 1;
+        response.window.next_seq = 2;
+        assert!(apply(&mut timeline, &action, response).is_empty());
+        assert_eq!(text(&timeline.rows[1]), "still streaming");
+        assert!(!timeline.rows[1].active);
     }
 }
