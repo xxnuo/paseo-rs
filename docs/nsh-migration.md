@@ -39,10 +39,9 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 - Rust-root runners have no TSX VM. Prefer NSH Rust Editor/DiffView/TextView and
   local WebView islands for browser-only code; introducing a TSX surface requires
   an explicit host boundary, not switching the whole product back to TSX.
-- NSH currently exposes the WebSocket host transport but its high-level Rust
-  connection wrapper is crate-private. Validate a small shared native/web API
-  with the same capability, cancellation and backpressure behavior before
-  implementing the Rust daemon client.
+- NSH exposes a shared Rust WebSocket facade for native/web, with owner cleanup,
+  cancellation and backpressure. The Rust app uses one continuous reader and
+  bounded, typed requests; additional workflows extend this client.
 
 ## TODO and gates
 
@@ -55,7 +54,7 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
   roundtrip and WebSocket URL validation in development QuickJS (2 tests).
 - [ ] Repeat SDK probes in release-hardened QuickJS (no dynamic constructors).
 - [x] Build/test the Rust-root address surface and launch native Linux and web WASM.
-- [ ] Establish Rust WebSocket transport and typed daemon conformance tests.
+- [x] Establish Rust WebSocket transport and typed daemon conformance tests.
 - [ ] Execute existing SDK, Zod, encryption and WebSocket in QuickJS and web.
 - [ ] Connect to an isolated real daemon: list projects, create agent, stream,
   send/cancel/retry, permission response, disconnect/reconnect, restart recovery.
@@ -126,13 +125,16 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 ## Current evidence
 
 Rust-first feasibility: `native` is an independent Cargo workspace using the
-local NSH checkout. The current Rust suite passes 29 tests (22 unit, two socket
-lifecycle flows and five host-form flows). The connection implementation passed
-clippy with warnings denied before adding the terminal drawing probe. The Rust-root GTK input flow
+local NSH checkout. The current Rust suite passes 50 tests (41 unit, four socket/
+directory lifecycle flows and five host-form flows), verified at `938e284f4`
+and again after enabling open-provider discovery. The connection implementation passed
+clippy with warnings denied before adding the terminal drawing probe; later DTOs
+still have unused-field warnings, so current warning-free clippy is not claimed. The Rust-root GTK input flow
 passes under Xvfb; `cargo check --target wasm32-unknown-unknown --lib` passes.
 The Rust-root test also passes in a real headless Chrome browser using the
 generated Rust WASM runtime (`nsh test .../probes/rust-root.test.ts --target web`).
-This is a host-address validation surface, not an authenticated connection.
+The address probe itself does not exercise an authenticated connection; the
+separate live-daemon workflows below cover direct connection and identity retention.
 Direct WS/TCP password query parameters are parsed separately from the transport
 URL with the upstream empty/duplicate/query-normalization semantics. SSH, local
 sockets and pairing remain separate unimplemented flows. The parser
@@ -176,18 +178,35 @@ compiles and packages the selected device ABI only;
 the prior APK accidentally retained a second architecture and exceeded available
 device storage. This does not cover Android IME, audio, chat or model inference.
 
-The Web WASM runtime builds and wasm-bindgen 0.2.130 runs successfully. A real
-daemon UI test using the separate NSH dev-server page fails to connect; the
-daemon's existing origin check rejects that cross-origin development setup.
-The new browser acceptance runner serves the packaged WASM site through the
-real daemon, preserving same-origin security rather than allowing all origins.
-Its first complete build renders the Rust page, but Playwright cannot find the
-address textbox by its accessible name: the web backend currently assigns the
-label to the wrapper instead of the actual input. This is being fixed in NSH,
-not bypassed with a different selector. A separate live upgrade check confirmed
-the daemon rejects foreign origins with HTTP 403.
+The Web WASM runtime builds and wasm-bindgen 0.2.130 runs successfully. The
+browser acceptance runner serves the packaged WASM site through the real daemon,
+preserving same-origin security. Connect, project display, refresh, disconnect,
+reconnect and persisted identity pass in actual Chrome; screenshots are retained
+under `packages/app-nsh/.nsh/evidence/rust-web-0181e7d5-9d09-451f-a6e2-23320ed21e4e`.
+The NSH web backend now assigns accessible labels, focus semantics and disabled
+state to the real input/textarea rather than its wrapper; 64 Node/Chrome checks
+pass. A separate live upgrade check confirms foreign origins receive HTTP 403.
+The separate NSH development server therefore cannot substitute for this
+same-origin acceptance setup. The 10.7 MB prototype package is not a complete-app
+performance comparison.
 The exact tool is installed separately under `.cache/paseo-nsh/wasm-bindgen-0.2.130`
 and selected with `NSH_WASM_BINDGEN`, leaving the system's older tool intact.
+
+The NSH workspace suite passes under Xvfb (4441 passed, 54 ignored across 86
+targets; `/tmp/paseo-nsh-workspace-tests-final.log`). The project page displays
+paged workspaces and Agents, uses each workspace's actual directory for provider
+discovery, and exposes provider/model/mode/features and Agent details read-only.
+Deterministic root tests cover leaving pages and switching workspaces while
+requests are pending. Real-daemon project-page interaction remains a separate
+acceptance task; the existing live Host workflow does not prove it.
+
+Conversation wire contracts retain creation idempotency, subscription identity,
+projected history coverage, permission actions and send/cancel outcome semantics.
+Eight Rust contract tests and four current-source Node schema tests pass, including
+the actual Rust serializer output. These contracts are not yet connected to chat
+UI or a timeline reducer. The hello now advertises `all_providers` because catalog
+and UI accept open provider/model IDs; unimplemented subscription/binary flags
+remain disabled.
 
 `TerminalProbe` is a separate registered Rust root for fixed-grid drawing only.
 It reads the upstream Android grapheme fixture directly, validates UTF-16 cell
