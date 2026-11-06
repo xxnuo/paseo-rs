@@ -329,7 +329,12 @@ try {
     );
   } else {
     if (target === "android") reverse = await androidReverse(daemon.port);
-    const failureScreenshot = path.join(appDirectory, ".nsh", "evidence", `project-connect-${target}-${randomUUID()}.png`);
+    const failureScreenshot = path.join(
+      appDirectory,
+      ".nsh",
+      "evidence",
+      `project-connect-${target}-${randomUUID()}.png`,
+    );
     await mkdir(path.dirname(failureScreenshot), { recursive: true });
     await writeFile(
       testFile,

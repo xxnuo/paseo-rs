@@ -79,6 +79,15 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 
 ### 2. Product workflows
 
+- [x] Direct-host project/workspace/provider/Agent directory browsing and details.
+- [x] Existing-workspace Agent creation with discovered provider/model/mode,
+  omitted provider-default overrides, saved creation identity/configuration,
+  result lookup and same-key retries after cancellation or uncertain errors.
+- [x] Typed chat RPCs and scoped local event delivery on the existing reader.
+- [x] Pure projected-history coverage and synchronization planner with upstream
+  fixture regressions; this is not yet a visible or complete timeline.
+- [ ] Connect timeline state to Client/UI and port live text/tool/turn reducers,
+  pending sends, cancellation confirmation, permissions and reconnect recovery.
 - [ ] Onboarding, welcome, hosts and open/add-project flows.
 - [ ] Project list/settings, workspace creation/fork/import/archive and scripts.
 - [ ] Agent list, provider/profile/model selection and provider configuration.
@@ -125,9 +134,12 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 ## Current evidence
 
 Rust-first feasibility: `native` is an independent Cargo workspace using the
-local NSH checkout. The current Rust suite passes 50 tests (41 unit, four socket/
-directory lifecycle flows and five host-form flows), verified at `938e284f4`
-and again after enabling open-provider discovery. The connection implementation passed
+local NSH checkout. At `ca57c0fd5`, all 71 Rust tests pass: 60 unit tests, two
+creation-recovery flows, four socket/directory lifecycle flows and five host-form
+flows (`/tmp/paseo-nsh-creation-platform-final-tests.log`). Creation recovery covers
+timeout/no-snapshot errors and owner cancellation combined with a workspace move.
+The same revision passes the Web/WASM library check.
+The connection implementation passed
 clippy with warnings denied before adding the terminal drawing probe; later DTOs
 still have unused-field warnings, so current warning-free clippy is not claimed. The Rust-root GTK input flow
 passes under Xvfb; `cargo check --target wasm32-unknown-unknown --lib` passes.
@@ -195,18 +207,53 @@ and selected with `NSH_WASM_BINDGEN`, leaving the system's older tool intact.
 The NSH workspace suite passes under Xvfb (4441 passed, 54 ignored across 86
 targets; `/tmp/paseo-nsh-workspace-tests-final.log`). The project page displays
 paged workspaces and Agents, uses each workspace's actual directory for provider
-discovery, and exposes provider/model/mode/features and Agent details read-only.
+discovery, and exposes provider/model/mode/features and Agent details. The creation
+form selects discovered models/modes or omits their overrides for provider defaults.
 Deterministic root tests cover leaving pages and switching workspaces while
-requests are pending. Real-daemon project-page interaction remains a separate
-acceptance task; the existing live Host workflow does not prove it.
+requests are pending. The expanded real-daemon GTK workflow now opens the project,
+refreshes directories, reads actual worktree-scoped provider features and Agent
+details, creates two Agents with default/explicit configuration, returns without
+losing the connection, disconnects from the page and reconnects with the same UUID.
+The SDK independently confirms exactly two new Agents with the expected worktree
+directory, workspace, provider and explicit model/mode. This uses fake Codex,
+without a prompt or model inference (`/tmp/paseo-nsh-project-creation-linux.log`).
+The same expanded directory/creation flow also passes on the API 36 x86_64
+Android emulator (`/tmp/paseo-nsh-project-creation-android-fixed.log`), with a
+single tap after editing inputs. The initial Android failures exposed native
+scroll containers consuming that first tap to dismiss focused inputs. Both
+form scroll containers now use `KeyboardTaps::Handled`, matching upstream form
+behavior; the acceptance runner keeps real touch input and its original checks.
+The runner waits for observable native state and distinguishes successive
+creation results, and saves a screenshot if the connection state never changes.
+Its temporary adb reverse mapping is removed after the run.
 
 Conversation wire contracts retain creation idempotency, subscription identity,
 projected history coverage, permission actions and send/cancel outcome semantics.
 Eight Rust contract tests and four current-source Node schema tests pass, including
-the actual Rust serializer output. These contracts are not yet connected to chat
-UI or a timeline reducer. The hello now advertises `all_providers` because catalog
-and UI accept open provider/model IDs; unimplemented subscription/binary flags
-remain disabled.
+the actual Rust serializer output. The production single-reader Client now routes
+typed chat requests/replies and local agent/creation events, with response-type,
+request-ID and optional subscription-token checks. Legacy event selection remains
+connection-wide and last-query-wins; local listener handles are not owned server
+subscriptions. Creation uses this Client; send/cancel/permissions/timeline APIs
+are not yet exposed by a conversation UI.
+
+The pure timeline module preserves projected source ranges, stable rows, epoch,
+generation, cached-versus-authoritative state and Tail/After/Before plans. Its
+local operation IDs are separate from Client-correlated wire UUIDs. Eleven unit
+regressions include actual captures, cross-boundary projection replacement,
+noncontiguous sources and independent client message IDs. Live events currently
+buffer and request authoritative catch-up; full live rendering, timeline UI,
+pending-send/permission reducers and reconnect integration remain open.
+
+Creation recovery persists the original key and configuration before sending.
+Timeout, owner disposal and a plain error without an authoritative creation
+snapshot retain that key; the daemon's catch-all error may follow resource
+creation. A directory change still permits lookup/retry of the original request.
+Only a confirmed result clears the pending record. Storage follows NSH's backend
+write semantics, without a stronger crash-durability guarantee.
+
+The hello advertises `all_providers` because catalog and UI accept open
+provider/model IDs; unimplemented subscription/binary flags remain disabled.
 
 `TerminalProbe` is a separate registered Rust root for fixed-grid drawing only.
 It reads the upstream Android grapheme fixture directly, validates UTF-16 cell
