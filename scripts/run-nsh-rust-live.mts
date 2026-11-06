@@ -439,6 +439,19 @@ try {
     });
     try {
       await driver.connect();
+      const wholeTurnTail = await driver.fetchAgentTimeline(worktreeAgent.id, {
+        direction: "tail",
+        projection: "projected",
+        limit: 50,
+        wholeTurns: true,
+      });
+      assert.equal(wholeTurnTail.error, null);
+      assert.equal(
+        wholeTurnTail.hasOlder,
+        true,
+        "Rust's whole-turn history mode must still paginate this fixture",
+      );
+      assert.equal(wholeTurnTail.entries.length, 50);
       const defaults = {
         config: { provider: provider.provider, cwd: worktreeCwd, title: "NSH_ORACLE_DEFAULTS" },
         workspaceId: workspace.id,
@@ -573,7 +586,7 @@ try {
       testFile,
       `import { expect, open, test } from "nsh/test";
 
-test("Rust project directory browses real workspace, provider and Agent RPCs without model inference", async () => {
+test("Rust workspace creates Agents and chats through real daemon RPCs without model inference", async () => {
   const app = await open("..", { network: "live" });
   const project = ${JSON.stringify(`text:${project.projectDisplayName}`)};
   const connected = ${JSON.stringify(`text:已连接：${getHostName()}`)};
@@ -585,6 +598,7 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   const projectPage = ${JSON.stringify(`text:项目：${project.projectDisplayName}`)};
   const projectButton = ${JSON.stringify(`role:button[${project.projectDisplayName}]`)};
   const creation = ${JSON.stringify(uiCreation)};
+  const chat = ${JSON.stringify(chat)};
   await app.waitFor("连接开发主机");
   expect(app.enabled(connect)).toBe(false);
   expect(app.enabled(refresh)).toBe(false);
@@ -669,6 +683,98 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   await app.waitFor(directory.detail, { timeout: 15000 });
   await app.press("role:button[刷新 Agent 详情]");
   await app.waitFor(directory.detail, { timeout: 15000 });
+
+  const openChat = "role:button[打开会话]";
+  const returnDetail = "role:button[返回 Agent 详情]";
+  const message = "label:消息";
+  const send = "role:button[发送]";
+  const stop = "role:button[停止]";
+  const older = "role:button[加载更早消息]";
+  const allow = "role:button[" + chat.allow.label + "]";
+  const deny = "role:button[" + chat.deny.label + "]";
+  const earliest = "text:NSH_HISTORY_USER_000";
+  const latest = "text:NSH_HISTORY_REPLY_063";
+  const historyCount = () => {
+    const match = app.texts().map((value) => /^已加载 ([0-9]+) 条历史消息$/.exec(value.trim())).find(Boolean);
+    return match ? Number(match[1]) : 0;
+  };
+  const revealMessage = async (selector: string, direction: number) => {
+    // Virtual rows must first be materialized by real scroll gestures; text queries cannot seek them.
+    for (let step = 0; step < Math.max(historyCount() * 2, 20) && !app.shows(selector); step += 1) {
+      await app.scroll("id:conversation-messages", direction * 160);
+    }
+    await app.waitFor(selector);
+  };
+  const loadEarlier = async (lastMessage: string, expectedRows?: number) => {
+    for (let page = 0; page < ${history.pages + 1} && app.enabled(older); page += 1) {
+      await app.waitUntil(() => app.enabled(older));
+      const before = historyCount();
+      await app.press(older);
+      await app.waitUntil(() => historyCount() > before);
+    }
+    await app.waitUntil(() => !app.enabled(older));
+    if (expectedRows !== undefined) expect(historyCount()).toBe(expectedRows);
+    await revealMessage(earliest, -1);
+    await revealMessage(lastMessage, 1);
+  };
+  const sendMessage = async (prompt: string) => {
+    await app.clear(message);
+    await app.type(message, prompt);
+    await app.waitUntil(() => app.enabled(send));
+    const before = historyCount();
+    await app.press(send);
+    await app.waitUntil(() => historyCount() > before);
+  };
+  const waitIdle = async () => {
+    await app.waitUntil(() => app.enabled(message) && app.shows(stop) && !app.enabled(stop));
+  };
+  await app.press(openChat);
+  await app.waitFor("text:会话已同步", { timeout: 15000 });
+  expect(app.enabled(older)).toBe(true);
+  expect(historyCount() < ${historyTurns * 2}).toBe(true);
+  await loadEarlier(latest, ${historyTurns * 2});
+  await sendMessage(chat.plain);
+  await waitIdle();
+  await revealMessage("text:" + chat.plainReply, 1);
+
+  await sendMessage(chat.tool);
+  await app.waitFor(allow, { timeout: 15000 });
+  expect(app.enabled(stop)).toBe(true);
+  await revealMessage("text:/shell/", 1);
+  await app.press(allow);
+  await app.waitUntil(() => !app.shows(allow));
+  await waitIdle();
+  await revealMessage("text:" + chat.toolReply, 1);
+  await app.waitFor("text:/shell/");
+
+  await sendMessage(chat.denied);
+  await app.waitFor(deny, { timeout: 15000 });
+  await app.press(deny);
+  await app.waitUntil(() => !app.shows(deny));
+  await waitIdle();
+  expect(app.shows("text:NSH_CHAT_DENIED_UNEXPECTED")).toBe(false);
+
+  await sendMessage(chat.cancelled);
+  await app.waitFor(allow, { timeout: 15000 });
+  expect(app.enabled(stop)).toBe(true);
+  await app.press(stop);
+  await app.waitUntil(() => !app.shows(allow));
+  await waitIdle();
+  expect(app.shows("text:NSH_CHAT_CANCEL_UNEXPECTED")).toBe(false);
+  await sendMessage(chat.after);
+  await waitIdle();
+  await revealMessage("text:" + chat.afterReply, 1);
+  await app.press("role:button[刷新会话]");
+  await app.waitFor("text:会话已同步", { timeout: 15000 });
+  await revealMessage("text:" + chat.afterReply, 1);
+  await app.press(returnDetail);
+  await app.waitFor(directory.detail);
+  await app.press(openChat);
+  await app.waitFor("text:会话已同步", { timeout: 15000 });
+  await loadEarlier("text:" + chat.afterReply);
+  await revealMessage("text:" + chat.plainReply, -1);
+  await app.press(returnDetail);
+  await app.waitFor(directory.detail);
   await app.press("role:button[返回项目列表]");
   await app.waitFor(connected);
   expect(app.enabled(address)).toBe(false);
@@ -706,7 +812,7 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
   await app.press(disconnect);
   await app.waitFor("text:已断开连接");
   expect(app.shows(project)).toBe(false);
-}, 180000);
+}, 300000);
 `,
       { flag: "wx" },
     );
@@ -714,7 +820,7 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
     if (target !== "headless") args.push("--target", target);
     await new Promise<void>((resolve, reject) => {
       const child = spawn(path.resolve(command), args, { cwd: appDirectory, stdio: "inherit" });
-      const timeout = setTimeout(() => child.kill("SIGKILL"), 240_000);
+      const timeout = setTimeout(() => child.kill("SIGKILL"), 420_000);
       const interrupt = () => child.kill("SIGTERM");
       const cleanup = () => {
         clearTimeout(timeout);
@@ -753,8 +859,12 @@ test("Rust project directory browses real workspace, provider and Agent RPCs wit
         assert.equal(actual.currentModeId, uiCreation.mode);
       }
     }
+    await verifyChat();
     console.log(
       "Rust UI creation verified by SDK: two unique worktree Agents, defaults and explicit options",
+    );
+    console.log(
+      "Rust UI chat verified by SDK: paged history, tool actions, cancellation and unique persisted messages",
     );
   }
 } finally {
