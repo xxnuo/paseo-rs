@@ -1,5 +1,52 @@
 # Paseo NSH migration
 
+## Paused checkpoint — 2026-11-06
+
+Paused at the user's request; the full migration is not complete. No further
+implementation or acceptance runs should start until the user resumes it.
+
+- Paseo product branch: `port/nsh-app`, implementation checkpoint `e1fab5e67`.
+  Turn grouping/footer (copy, elapsed time, end time), complete tool details and
+  the After-prefix/live-stream race fix are committed. Latest Rust suite:
+  **171 passed, 0 failed**; WASM check passed. Footer dates currently use a fixed
+  local `%Y-%m-%d %H:%M` format, without OS 12/24-hour preference/i18n.
+- The earlier Android run failed with two assistant rows instead of one
+  (131 versus 130). The subsequent race fix passes regression tests but has
+  **not** been revalidated on GTK/Android with strict viewport visibility.
+  The runner now checks native geometry; its viewport self-check passed in the
+  previous session, but the strengthened real-host scenario has not run.
+- NSH product branch: `core/paseo-client-runtime`, `26a8311a`. Geometry queries
+  `App.bounds` / `App.viewport` and their tests are committed. Workspace clippy
+  passed. The latest full workspace run was **4444 passed, 2 failed, 54 ignored**
+  (Carousel focus tests); do not report it as green.
+- `cargo xtask compat` failed because the external harness references missing
+  `WebProps.incognito`; harness version/API history still needs investigation.
+  Frozen compatibility expectations were not altered.
+- NSH branch `test/atomic-focus-transfer`, `616e68d3`, is a separate **WIP**:
+  atomic engine focus transfer and headless call sites plus a regression draft.
+  It has not been formatted, compiled, tested or integrated into the product
+  branch. Missing input/programmatic-focus coverage and full focus verification
+  remain pending. Preserve it as a checkpoint, not an accepted fix.
+- Resume order: review/finish the isolated focus fix; investigate compatibility;
+  run required NSH checks; rebuild the CLI; run the strict GTK and Android live
+  runner; then update acceptance evidence. Parent runs Rust/NSH builds serially.
+- Use `paseo.worktrees/nsh-sdk` for the daemon runner: its Node dependencies/dist
+  are prepared; the main checkout has stale Node dependencies. Point the runner
+  at the main `paseo/packages/app-nsh` product directory.
+- Evidence logs/screenshots are archived locally under
+  `/home/xxnuo/projects/getpaseo/checkpoints/2026-11-06-paused/`; generated app
+  build/test directories are disposable. The dedicated `PaseoNshQA` emulator
+  was stopped, and its temporary adb reverse list was empty.
+- All task topic branches are preserved remotely in `xxnuo/paseo-rs` and the
+  `xxnuo/nsh` fork (NSH remote `backup`; `origin` remains the upstream).
+  This backup does not merge WIP into main or imply release readiness.
+
+Still outstanding: full theme/layout and remaining pages, project/workspace
+creation parity, attachments, files/Git/editor, terminal/audio/plugins,
+iOS/macOS/Windows acceptance, packaging/release and equivalent-feature
+performance comparisons. Fake-provider runs do not prove real inference or
+process/daemon-restart recovery.
+
 ## Scope and completion rules
 
 Replace the Expo/React Native app UI on web, desktop, Android and iOS with NSH,
@@ -91,8 +138,12 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 - [x] Same-process direct-host socket recovery: verified server identity, bounded
   retry backoff, restored Agent route and expanded details, retained loaded history
   and draft, and cursor-based catch-up without resending messages.
+- [x] Turn membership and one footer per response, completed duration/end time,
+  owner-scoped live elapsed time and copy of the turn's assistant text.
+- [x] Readable known tool detail fields, structured input/output/errors, literal
+  output fences and empty/loading states without inventing a tool outcome.
 - [ ] Complete timeline-specific todo/compaction/plugin presentation, turn
-  footers, search/outline, attachments and full reconnect/cache restoration.
+  forking, search/outline, attachments and full reconnect/cache restoration.
 - [x] Agent attention clearing on entry/input/successful send/blur, deferred
   foreground attention, permission protection and lifecycle visibility rules.
 - [x] Explicit workspace read action with backend errors, retry and directory refresh.
