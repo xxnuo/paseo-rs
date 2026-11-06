@@ -323,7 +323,7 @@ fn one_remote_close_reconnects_with_the_same_identity_and_restores_the_agent_sub
         .collect();
     assert_eq!(hellos.len(), 2);
     assert_eq!(hellos[0].1["clientId"], hellos[1].1["clientId"]);
-    assert_eq!(hellos[1].1["password"], "memory-only");
+    assert_eq!(hellos[1].1["auth"]["password"], "memory-only");
     assert!(trace.requests.iter().any(|(number, frame)| *number == 2
         && frame["message"]["type"] == "agent.timeline.set_subscription.request"
         && frame["message"]["agentIds"] == json!([AGENT])));
