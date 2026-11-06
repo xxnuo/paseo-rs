@@ -169,22 +169,33 @@ the root releases a socket with a pending read. These are not reconnect/history
 acceptance tests.
 
 Android API 36 x86_64 emulator: the actual Rust-root native address-input test
-passes. NSH test tooling now compiles and packages the selected device ABI only;
+and real-daemon connect/project/refresh/disconnect/reconnect workflow pass.
+The latter uses a scoped adb reverse for the fixture's ephemeral port, verifies
+identity retention, and removes its mapping after the run. NSH test tooling now
+compiles and packages the selected device ABI only;
 the prior APK accidentally retained a second architecture and exceeded available
-device storage. This smoke test does not cover Android daemon RPC, IME or audio.
+device storage. This does not cover Android IME, audio, chat or model inference.
 
 The Web WASM runtime builds and wasm-bindgen 0.2.130 runs successfully. A real
 daemon UI test using the separate NSH dev-server page fails to connect; the
 daemon's existing origin check rejects that cross-origin development setup.
-The next browser acceptance runner must serve the packaged WASM site through
-the real daemon, preserving same-origin security rather than allowing all origins.
+The new browser acceptance runner serves the packaged WASM site through the
+real daemon, preserving same-origin security rather than allowing all origins.
+Its first complete build renders the Rust page, but Playwright cannot find the
+address textbox by its accessible name: the web backend currently assigns the
+label to the wrapper instead of the actual input. This is being fixed in NSH,
+not bypassed with a different selector. A separate live upgrade check confirmed
+the daemon rejects foreign origins with HTTP 403.
 The exact tool is installed separately under `.cache/paseo-nsh/wasm-bindgen-0.2.130`
 and selected with `NSH_WASM_BINDGEN`, leaving the system's older tool intact.
 
 `TerminalProbe` is a separate registered Rust root for fixed-grid drawing only.
 It reads the upstream Android grapheme fixture directly, validates UTF-16 cell
 offsets/styles and compares per-cell placement to whole-row shaping. Its four
-unit tests pass; it is not a VT parser or live terminal. The production daemon
+unit tests and GTK drawing test pass. The inspected screenshot is retained at
+`packages/app-nsh/.nsh/evidence/terminal-grid-linux.png`: per-cell drawing breaks
+cross-cell conjunct shaping, while natural whole-row drawing does not preserve
+all terminal columns. It is not a VT parser or live terminal. The production daemon
 streams ANSI output/replay, not ongoing character-grid snapshots, so preserving
 terminal behavior still needs a VT implementation and verified glyph placement.
 
