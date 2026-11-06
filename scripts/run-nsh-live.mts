@@ -63,10 +63,14 @@ try {
         capabilities: { network: { hosts: ["127.0.0.1"] } },
       }),
     );
+    const bootstrap = path
+      .join(repository, "packages/app-nsh/runtime/bootstrap.ts")
+      .replaceAll("\\", "/");
     const oracle = path.join(repository, "packages/app-nsh/probes/live.ts").replaceAll("\\", "/");
     await writeFile(
       path.join(scratch, "App.tsx"),
-      `import { mount, signal, Text } from "nsh";
+      `import ${JSON.stringify(bootstrap)};
+import { mount, signal, Text } from "nsh";
 import { runLiveSdkOracle } from ${JSON.stringify(oracle)};
 const status = signal("running");
 function Oracle() { return <Text>{status()}</Text>; }
@@ -95,13 +99,19 @@ test("real daemon SDK protocol oracle (fake provider, no model)", async () => {
       });
       const timeout = setTimeout(() => child.kill("SIGKILL"), 90_000);
       const interrupt = () => child.kill("SIGTERM");
-      process.once("SIGINT", interrupt);
-      process.once("SIGTERM", interrupt);
-      child.once("error", reject);
-      child.once("close", (code, signal) => {
+      const cleanup = () => {
         clearTimeout(timeout);
         process.off("SIGINT", interrupt);
         process.off("SIGTERM", interrupt);
+      };
+      process.once("SIGINT", interrupt);
+      process.once("SIGTERM", interrupt);
+      child.once("error", (error) => {
+        cleanup();
+        reject(error);
+      });
+      child.once("close", (code, signal) => {
+        cleanup();
         if (code === 0) resolve();
         else reject(new Error(`NSH oracle exited with ${signal ?? code}`));
       });
