@@ -255,7 +255,8 @@ try {
     selectedMode: `role:button[模式：${explicitMode.label}（已选择）]`,
   };
   const directoryOracle = {
-    workspace: `role:button[工作区：${workspace.name} · 空闲]`,
+    // The button also names its cwd; press the title text's nearest pressable ancestor.
+    workspace: `text:工作区：${workspace.name} · 空闲`,
     provider: `role:button[服务商：${provider.label ?? provider.provider} · 可用]`,
     cwd: `text:服务商目录：${worktreeCwd}`,
     catalog: `text:服务商 ID：${provider.provider}\n模型\n${provider.models.map((model) => `${model.label}（${model.id}）`).join("\n")}\n模式\n${provider.modes.map((mode) => `${mode.label}（${mode.id}）`).join("\n")}`,
