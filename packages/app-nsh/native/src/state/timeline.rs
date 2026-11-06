@@ -930,17 +930,16 @@ impl Timeline {
         let base_end = current_coverage
             .as_ref()
             .map_or(0, |range| range.contiguous.span.end);
-        let acknowledged_rows: std::collections::HashSet<u64> = pending
-            .provisional_rows
-            .iter()
-            .filter(|row| {
-                history
-                    .entries
-                    .iter()
-                    .any(|entry| entry_covers_row(entry, row, base_end))
-            })
-            .map(|row| row.id)
-            .collect();
+        let mut acknowledged_rows = std::collections::HashSet::new();
+        let mut claimed_entries = std::collections::HashSet::new();
+        for row in &pending.provisional_rows {
+            if let Some((index, _)) = history.entries.iter().enumerate().find(|(index, entry)| {
+                !claimed_entries.contains(index) && entry_covers_row(entry, row, base_end)
+            }) {
+                claimed_entries.insert(index);
+                acknowledged_rows.insert(row.id);
+            }
+        }
         for entry in history.entries {
             // Older projected daemons may return rows owned by the next before page.
             if before
@@ -990,7 +989,10 @@ impl Timeline {
                         .as_ref()
                         .is_some_and(|range| range.contains(epoch, seq)),
                     _ => {
-                        buffered.keep_provisional
+                        matches!(
+                            &buffered.event.event,
+                            StreamEvent::Known(KnownStreamEvent::TurnStarted { .. })
+                        ) || buffered.keep_provisional
                             || buffered.arrival > pending.buffer_watermark
                             || buffered
                                 .row_id
@@ -1109,6 +1111,7 @@ impl Timeline {
     }
 
     fn reconcile_provisional_prefixes(&mut self, previous: &[Row], base_end: u64) {
+        let mut claimed = std::collections::HashSet::new();
         for live in previous.iter().filter(|row| row.provisional) {
             let (TimelineItem::Assistant(text) | TimelineItem::Reasoning(text)) = &*live.item
             else {
@@ -1119,7 +1122,8 @@ impl Timeline {
                 .iter()
                 .enumerate()
                 .filter(|(index, canonical)| {
-                    canonical.span.end > base_end
+                    !claimed.contains(index)
+                        && canonical.span.end > base_end
                         && canonical.provider == live.provider
                         && compatible_turn(canonical, live)
                         && (canonical.intersects(live)
@@ -1173,6 +1177,7 @@ impl Timeline {
             if matching.is_empty() {
                 continue;
             }
+            claimed.insert(index);
             let canonical_id = self.rows[index].id;
             self.rows[index].id = live.id;
             if self.live_head == Some(canonical_id) {
@@ -2697,5 +2702,46 @@ mod tests {
         assert!(
             matches!(&*timeline.rows[2].item,TimelineItem::User(user) if user.client_message_id.as_deref() == Some("local"))
         );
+    }
+
+    #[test]
+    fn a_projection_can_cover_only_one_of_two_equal_provisional_turn_segments() {
+        for request_before_stream in [true, false] {
+            let mut timeline = current(vec![user(1)], 1);
+            let mut action =
+                request_before_stream.then(|| timeline.catch_up(timeline.generation).remove(0));
+            timeline.stream(timeline.generation, anonymous("Hello", None));
+            let first_id = timeline.rows[1].id;
+            timeline.stream(timeline.generation, turn_started());
+            timeline.stream(timeline.generation, anonymous("Hello", None));
+            let second_id = timeline.rows[2].id;
+            assert_ne!(first_id, second_id);
+            if action.is_none() {
+                action = Some(timeline.catch_up(timeline.generation).remove(0));
+            }
+            let action = action.unwrap();
+            let canonical = entry(
+                2,
+                2,
+                json!({"type":"assistant_message","text":"Hello"}),
+                &[(2, 2)],
+            );
+            assert!(
+                apply(
+                    &mut timeline,
+                    &action,
+                    page(&action, "epoch", Some(2), Some(2), vec![canonical])
+                )
+                .is_empty()
+            );
+            assert_eq!(timeline.rows.len(), 3);
+            assert_eq!(text(&timeline.rows[1]), "Hello");
+            assert_eq!(text(&timeline.rows[2]), "Hello");
+            assert_eq!(timeline.rows[1].id, first_id);
+            assert_eq!(timeline.rows[2].id, second_id);
+            assert!(!timeline.rows[1].provisional);
+            assert!(timeline.rows[2].provisional);
+            assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 2);
+        }
     }
 }
