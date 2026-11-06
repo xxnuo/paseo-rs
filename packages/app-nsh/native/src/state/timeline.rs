@@ -2869,4 +2869,62 @@ mod tests {
             assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 2);
         }
     }
+
+    #[test]
+    fn after_projection_prefix_before_committed_stream_resumes_one_live_reply() {
+        // Real daemon After pages carry whole projected items across the requested cursor.
+        let mut timeline = current(seeded_history(), 128);
+        let old_ids: Vec<_> = timeline.rows.iter().map(|row| row.id).collect();
+        let mut prompt = live(
+            json!({"type":"user_message","text":"Respond with exactly: NSH_CHAT_STREAM_中文","clientMessageId":"new-client"}),
+            Some(129),
+        );
+        if let StreamEvent::Known(KnownStreamEvent::Timeline { turn_id, .. }) = &mut prompt.event {
+            *turn_id = Some("fake-turn-0".into());
+        }
+        timeline.stream(timeline.generation, prompt);
+        timeline.stream(timeline.generation, turn_started());
+        let after = timeline.catch_up(timeline.generation).remove(0);
+        let mut prefix = entry(
+            130,
+            130,
+            json!({"type":"assistant_message","text":"NSH_CH"}),
+            &[(130, 130)],
+        );
+        prefix["turnId"] = json!("fake-turn-0");
+        assert!(
+            apply(
+                &mut timeline,
+                &after,
+                page(&after, "epoch", Some(130), Some(130), vec![prefix])
+            )
+            .is_empty()
+        );
+        for (seq, chunk) in [(130, "NSH_CH"), (131, "AT_STREAM_中文")] {
+            let mut event = anonymous(chunk, Some(seq));
+            if let StreamEvent::Known(KnownStreamEvent::Timeline { turn_id, .. }) = &mut event.event
+            {
+                *turn_id = Some("fake-turn-0".into());
+            }
+            assert!(timeline.stream(timeline.generation, event).is_empty());
+        }
+        assert_eq!(timeline.rows.len(), 130);
+        assert_eq!(text(&timeline.rows[129]), "NSH_CHAT_STREAM_中文");
+        assert_eq!(text(&timeline.rows[127]), "NSH_HISTORY_REPLY_063");
+        assert_eq!(
+            timeline.rows[..128]
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            old_ids
+        );
+        assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 131);
+        let completion = timeline.stream(timeline.generation, finish()).remove(0);
+        let mut response = page(&completion, "epoch", None, None, vec![]);
+        response.window.max_seq = 131;
+        response.window.next_seq = 132;
+        assert!(apply(&mut timeline, &completion, response).is_empty());
+        assert_eq!(timeline.rows.len(), 130);
+        assert_eq!(text(&timeline.rows[129]), "NSH_CHAT_STREAM_中文");
+    }
 }
