@@ -169,7 +169,7 @@ struct Conversation {
     transactions: RefCell<ConversationState>,
     attention: RefCell<Attention>,
     attention_busy: Cell<bool>,
-    attention_queued: Cell<bool>,
+    attention_queued: Cell<Option<Trigger>>,
     attention_revision: Cell<u64>,
     live_revision: Cell<u64>,
     history_task: Rc<RequestTask>,
@@ -199,12 +199,13 @@ impl Conversation {
         if !self.attention.borrow_mut().trigger(trigger) {
             return;
         }
-        self.send_attention_clear();
+        self.send_attention_clear(trigger);
     }
 
-    fn send_attention_clear(self: &Rc<Self>) {
+    fn send_attention_clear(self: &Rc<Self>, trigger: Trigger) {
         if self.attention_busy.replace(true) {
-            self.attention_queued.set(true);
+            self.attention_queued
+                .set(Some(trigger.queued(self.attention_queued.get())));
             return;
         }
         let revision = self.attention_revision.get();
@@ -221,8 +222,8 @@ impl Conversation {
                     .set(state.attention_revision.get().wrapping_add(1));
                 state.attention.borrow_mut().update(false, false);
             }
-            if state.attention_queued.replace(false) {
-                state.clear_attention(Trigger::InputFocus);
+            if let Some(trigger) = state.attention_queued.take() {
+                state.clear_attention(trigger);
             }
         });
     }
@@ -373,7 +374,7 @@ impl Conversation {
                     == Some("permission"),
             );
             if clear {
-                self.send_attention_clear();
+                self.send_attention_clear(Trigger::FocusEntry);
             }
         }
         if self.live_revision.get() == revision {
@@ -963,7 +964,7 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
         transactions: RefCell::new(transactions),
         attention: RefCell::new(Attention::default()),
         attention_busy: Cell::new(false),
-        attention_queued: Cell::new(false),
+        attention_queued: Cell::new(None),
         attention_revision: Cell::new(0),
         live_revision: Cell::new(0),
         history_task: RequestTask::new(),
@@ -996,7 +997,7 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
         let viewed = lifecycle() == nsh_core::platform::Lifecycle::Active;
         let clear = visibility_state.attention.borrow_mut().visibility(viewed);
         if clear && visibility_state.active.get() && visibility_state.client.is_connected() {
-            visibility_state.send_attention_clear();
+            visibility_state.send_attention_clear(Trigger::FocusEntry);
         }
     });
     let rows = state.rows;

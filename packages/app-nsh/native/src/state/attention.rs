@@ -8,6 +8,15 @@ pub(crate) enum Trigger {
     AgentBlur,
 }
 
+impl Trigger {
+    pub(crate) fn queued(self, previous: Option<Self>) -> Self {
+        // Automatic focus entry must never replace a real interaction or be promoted to one.
+        previous
+            .filter(|trigger| *trigger != Self::FocusEntry)
+            .unwrap_or(self)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Attention {
     required: bool,
@@ -114,5 +123,21 @@ mod tests {
         state.update(true, false);
         assert!(!state.snapshot(true, false));
         assert!(!state.trigger(Trigger::FocusEntry));
+    }
+
+    #[test]
+    fn queued_automatic_entry_cannot_clear_a_new_foreground_reply() {
+        let mut state = Attention::default();
+        state.update(true, false);
+        assert!(state.visibility(true));
+        state.visibility(false);
+        assert!(state.visibility(true));
+        let queued = Trigger::FocusEntry.queued(None);
+        state.update(false, false);
+        state.update(true, false);
+        assert!(!state.trigger(queued));
+        let interaction = Trigger::InputFocus.queued(Some(queued));
+        assert!(Trigger::FocusEntry.queued(Some(interaction)) == Trigger::InputFocus);
+        assert!(state.trigger(interaction));
     }
 }
