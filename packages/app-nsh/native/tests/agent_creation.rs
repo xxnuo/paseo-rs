@@ -230,6 +230,11 @@ fn exercise_recovery(wait_for_timeout: bool) {
         .unwrap();
     assert!(app.screen().enabled("role:button[创建 Agent]").unwrap());
     assert!(!app.screen().enabled("role:button[重试同一次创建]").unwrap());
+    app.type_text("label:Agent 名称（可选）", " next").unwrap();
+    assert!(
+        !app.screen()
+            .shows("已创建 Agent：created-ui-agent。刷新 Agent 列表即可查看")
+    );
     let requests = requests.lock().unwrap();
     let creates: Vec<_> = requests
         .iter()

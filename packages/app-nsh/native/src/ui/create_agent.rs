@@ -305,7 +305,10 @@ pub(super) fn form(
                 .label("Agent 名称（可选）")
                 .value(move || title.get())
                 .disabled(move || field_state.blocked() || !supported)
-                .on_change(move |value: &str| title.set(value.to_owned()))
+                .on_change(move |value: &str| {
+                    title.set(value.to_owned());
+                    status.set(String::new());
+                })
                 .p_3()
                 .border_1()
                 .border_color(move || theme().input)
@@ -314,7 +317,10 @@ pub(super) fn form(
         .child(
             button()
                 .disabled(move || busy.get() || pending_key.get().is_some() || !supported)
-                .on_press(move || model.set(None))
+                .on_press(move || {
+                    model.set(None);
+                    status.set(String::new());
+                })
                 .p_3()
                 .child(
                     text(move || {
@@ -338,7 +344,10 @@ pub(super) fn form(
             content = content.child(
                 button()
                     .disabled(move || busy.get() || pending_key.get().is_some() || !supported)
-                    .on_press(move || model.set(Some(id.clone())))
+                    .on_press(move || {
+                        model.set(Some(id.clone()));
+                        status.set(String::new());
+                    })
                     .p_3()
                     .child(
                         text(move || {
@@ -359,7 +368,10 @@ pub(super) fn form(
     content = content.child(
         button()
             .disabled(move || busy.get() || pending_key.get().is_some() || !supported)
-            .on_press(move || mode.set(None))
+            .on_press(move || {
+                mode.set(None);
+                status.set(String::new());
+            })
             .p_3()
             .child(
                 text(move || {
@@ -380,7 +392,10 @@ pub(super) fn form(
             content = content.child(
                 button()
                     .disabled(move || busy.get() || pending_key.get().is_some() || !supported)
-                    .on_press(move || mode.set(Some(id.clone())))
+                    .on_press(move || {
+                        mode.set(Some(id.clone()));
+                        status.set(String::new());
+                    })
                     .p_3()
                     .child(
                         text(move || {
