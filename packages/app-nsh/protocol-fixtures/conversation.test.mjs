@@ -15,6 +15,8 @@ import {
 // Only its temporary directory is replaced by /fixture. Random IDs/timestamps are actual wire data.
 const capture = JSON.parse(await readFile(new URL("./conversation.json", import.meta.url), "utf8"));
 const timeline = JSON.parse(await readFile(new URL("./timeline.json", import.meta.url), "utf8"));
+// Source-schema cases, with the Agent snapshot reused from the real capture above.
+const attention = JSON.parse(await readFile(new URL("./attention-schema.json", import.meta.url), "utf8"));
 const payload = (id) =>
   capture.find(
     ({ direction, frame }) => direction === "server" && frame.message.payload?.requestId === id,
@@ -82,6 +84,44 @@ test("source schemas retain the missing/null distinctions used by the Rust proje
   );
   queued.message.payload.deliveryStatus = "queued";
   accepted(WSOutboundMessageSchema, queued);
+});
+
+test("attention source schemas accept string and array targets and retain required result fields", () => {
+  for (const { direction, frame } of attention) {
+    const schema = direction === "client" ? WSInboundMessageSchema : WSOutboundMessageSchema;
+    accepted(schema, frame);
+    const clone = structuredClone(frame);
+    const body = direction === "client" ? clone.message : clone.message.payload;
+    const target = "agentId" in body ? "agentId" : "workspaceId";
+    body[target] = [body[target]];
+    accepted(schema, clone);
+    body[target] = null;
+    rejected(schema, clone);
+  }
+  const agentRequest = structuredClone(attention[0].frame);
+  delete agentRequest.message.requestId;
+  accepted(WSInboundMessageSchema, agentRequest);
+  const workspaceRequest = structuredClone(attention[2].frame);
+  delete workspaceRequest.message.requestId;
+  rejected(WSInboundMessageSchema, workspaceRequest);
+  for (const field of ["requestId", "agentId", "agents"]) {
+    const clone = structuredClone(attention[1].frame);
+    delete clone.message.payload[field];
+    rejected(WSOutboundMessageSchema, clone);
+  }
+  for (const field of ["requestId", "workspaceId", "clearedAgentIds", "results", "success", "error"]) {
+    const clone = structuredClone(attention[3].frame);
+    delete clone.message.payload[field];
+    rejected(WSOutboundMessageSchema, clone);
+  }
+  for (const field of ["workspaceId", "clearedAgentIds", "success", "error"]) {
+    const clone = structuredClone(attention[3].frame);
+    delete clone.message.payload.results[0][field];
+    rejected(WSOutboundMessageSchema, clone);
+  }
+  const failed = attention[4].frame.message.payload;
+  assert.equal(failed.success, false);
+  assert.equal(failed.results[0].error, "Workspace not found: attention-workspace");
 });
 
 test("tool/plan/question/mode/other permissions share typed action and resolution contracts", () => {
@@ -158,6 +198,9 @@ test(
           message.config.title === null,
       ),
     );
+    for (const type of ["clear_agent_attention", "workspace.clear_attention.request"]) {
+      assert(requests.some(({ message }) => message.type === type));
+    }
     assert(
       requests.some(
         ({ message }) =>

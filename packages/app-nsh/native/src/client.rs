@@ -5,9 +5,10 @@ use crate::protocol::catalog::{
     self, AgentResult, Agents, CatalogResponse, ProviderFeatures, Providers, Workspaces,
 };
 use crate::protocol::conversation::{
-    self, ActiveTurnBehavior, AgentConfig, Cancelled, ChatSessionEvent, ConversationMessage,
-    Created, CreationKind, CreationSubscription, History, HistoryOptions, PermissionResponse,
-    RpcError, Sent, SessionSubscription, SubscriptionReleased, TimelineSubscription,
+    self, ActiveTurnBehavior, AgentAttentionCleared, AgentConfig, Cancelled, ChatSessionEvent,
+    ConversationMessage, Created, CreationKind, CreationSubscription, History, HistoryOptions,
+    PermissionResponse, RpcError, Sent, SessionSubscription, SubscriptionReleased,
+    TimelineSubscription, WorkspaceAttentionCleared,
 };
 use crate::protocol::{self, HelloRejection, ProjectList, ServerEvent, ServerInfo};
 use nsh_core::{
@@ -73,6 +74,7 @@ pub(crate) enum ConversationError {
     Client(ClientError),
     Rpc(RpcError),
     Unsupported(&'static str),
+    Backend(String),
 }
 
 impl From<ClientError> for ConversationError {
@@ -87,6 +89,7 @@ impl fmt::Display for ConversationError {
             Self::Client(error) => fmt::Display::fmt(error, f),
             Self::Rpc(error) => f.write_str(&error.error),
             Self::Unsupported(message) => f.write_str(message),
+            Self::Backend(message) => f.write_str(message),
         }
     }
 }
@@ -97,6 +100,7 @@ impl fmt::Debug for ConversationError {
             Self::Client(_) => "ConversationError::Client",
             Self::Rpc(_) => "ConversationError::Rpc",
             Self::Unsupported(_) => "ConversationError::Unsupported",
+            Self::Backend(_) => "ConversationError::Backend",
         })
     }
 }
@@ -483,6 +487,104 @@ impl Client {
         Ok(())
     }
 
+    pub(crate) async fn clear_agent_attention(
+        &self,
+        agent_id: &str,
+    ) -> Result<AgentAttentionCleared, ConversationError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        match self
+            .attention_request(
+                ReplyKind::AgentAttentionCleared,
+                &id,
+                conversation::clear_agent_attention(&id, agent_id),
+                AttentionTarget::Agent(agent_id.into()),
+            )
+            .await?
+        {
+            PendingReply::AgentAttentionCleared(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    pub(crate) fn clear_agent_attention_after_page(&self, agent_id: String) {
+        if !self.owner.is_live() || self.pending.failure.get().is_some() {
+            return;
+        }
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        self.releases
+            .borrow_mut()
+            .retain_mut(|task| std::pin::Pin::new(task).poll(&mut context).is_pending());
+        let socket = self.socket.clone();
+        let pending = self.pending.clone();
+        let on_state = self.on_state.clone();
+        let task = self.owner.run(|| {
+            spawn(async move {
+                let id = uuid::Uuid::new_v4().to_string();
+                let Ok((guard, response)) = pending.register_target(
+                    id.clone(),
+                    ReplyKind::AgentAttentionCleared,
+                    Some(AttentionTarget::Agent(agent_id.clone())),
+                ) else {
+                    return;
+                };
+                let _ = request_registered(
+                    &socket,
+                    &pending,
+                    &on_state,
+                    conversation::clear_agent_attention(&id, &agent_id),
+                    guard,
+                    response,
+                )
+                .await;
+            })
+        });
+        self.releases.borrow_mut().push(task);
+    }
+
+    pub(crate) async fn clear_workspace_attention(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceAttentionCleared, ConversationError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        match self
+            .attention_request(
+                ReplyKind::WorkspaceAttentionCleared,
+                &id,
+                conversation::clear_workspace_attention(&id, workspace_id),
+                AttentionTarget::Workspace(workspace_id.into()),
+            )
+            .await?
+        {
+            PendingReply::WorkspaceAttentionCleared(value) => workspace_attention_result(value),
+            _ => Err(ClientError::InvalidProtocol.into()),
+        }
+    }
+
+    async fn attention_request(
+        &self,
+        expected: ReplyKind,
+        id: &str,
+        wire: String,
+        target: AttentionTarget,
+    ) -> Result<PendingReply, ConversationError> {
+        let (guard, response) = self
+            .pending
+            .register_target(id.into(), expected, Some(target))?;
+        match request_registered(
+            &self.socket,
+            &self.pending,
+            &self.on_state,
+            wire,
+            guard,
+            response,
+        )
+        .await?
+        {
+            PendingReply::RpcError(error) => Err(ConversationError::Rpc(error)),
+            value => Ok(value),
+        }
+    }
+
     pub(crate) fn listen_agent(
         &self,
         agent_id: &str,
@@ -567,6 +669,27 @@ impl Client {
     }
 }
 
+fn workspace_attention_result(
+    value: WorkspaceAttentionCleared,
+) -> Result<WorkspaceAttentionCleared, ConversationError> {
+    if !value.success || value.results.iter().any(|result| !result.success) {
+        let error = value
+            .error
+            .as_deref()
+            .or_else(|| {
+                value
+                    .results
+                    .iter()
+                    .filter(|result| !result.success)
+                    .find_map(|result| result.error.as_deref())
+            })
+            .unwrap_or("Failed to clear workspace attention")
+            .to_owned();
+        return Err(ConversationError::Backend(error));
+    }
+    Ok(value)
+}
+
 fn release_on(
     owner: Owner,
     releases: &RefCell<Vec<Spawned<()>>>,
@@ -613,6 +736,17 @@ async fn request_on(
     wire: String,
 ) -> Result<PendingReply, ClientError> {
     let (guard, reply) = pending.register(request_id.to_owned(), expected)?;
+    request_registered(socket, pending, on_state, wire, guard, reply).await
+}
+
+async fn request_registered(
+    socket: &WebSocket,
+    pending: &Rc<PendingRequests>,
+    on_state: &Rc<dyn Fn(ClientError)>,
+    wire: String,
+    guard: PendingGuard,
+    reply: Response,
+) -> Result<PendingReply, ClientError> {
     let result = with_timeout(async {
         if socket.write(WebSocketData::Text(wire)).await.is_err() {
             fail_connection(pending, on_state, ClientError::Transport);
@@ -800,8 +934,32 @@ struct PendingRequests {
 
 struct PendingSlot {
     expected: ReplyKind,
+    attention_target: Option<AttentionTarget>,
     result: Option<Result<PendingReply, ClientError>>,
     waker: Option<Waker>,
+}
+
+enum AttentionTarget {
+    Agent(String),
+    Workspace(String),
+}
+
+impl AttentionTarget {
+    fn matches(&self, reply: &PendingReply) -> bool {
+        match (self, reply) {
+            (Self::Agent(id), PendingReply::AgentAttentionCleared(reply)) => {
+                reply.agent_id.is_single(id)
+                    && reply.agents.len() <= 1
+                    && reply.agents.iter().all(|snapshot| snapshot.agent.id == *id)
+            }
+            (Self::Workspace(id), PendingReply::WorkspaceAttentionCleared(reply)) => {
+                reply.workspace_id.is_single(id)
+                    && reply.results.len() == 1
+                    && reply.results[0].workspace_id == *id
+            }
+            _ => false,
+        }
+    }
 }
 
 struct PendingGuard {
@@ -869,6 +1027,15 @@ impl PendingRequests {
         request_id: String,
         expected: ReplyKind,
     ) -> Result<(PendingGuard, Response), ClientError> {
+        self.register_target(request_id, expected, None)
+    }
+
+    fn register_target(
+        self: &Rc<Self>,
+        request_id: String,
+        expected: ReplyKind,
+        attention_target: Option<AttentionTarget>,
+    ) -> Result<(PendingGuard, Response), ClientError> {
         if let Some(error) = self.failure.get() {
             return Err(error);
         }
@@ -877,6 +1044,7 @@ impl PendingRequests {
         }
         let slot = Rc::new(RefCell::new(PendingSlot {
             expected,
+            attention_target,
             result: None,
             waker: None,
         }));
@@ -923,6 +1091,12 @@ impl PendingRequests {
                 ConversationMessage::History(value) => PendingReply::History(value),
                 ConversationMessage::Sent(value) => PendingReply::Sent(value),
                 ConversationMessage::Cancelled(value) => PendingReply::Cancelled(value),
+                ConversationMessage::AgentAttentionCleared(value) => {
+                    PendingReply::AgentAttentionCleared(value)
+                }
+                ConversationMessage::WorkspaceAttentionCleared(value) => {
+                    PendingReply::WorkspaceAttentionCleared(value)
+                }
                 ConversationMessage::RpcError(error) => {
                     let slot = {
                         let mut slots = self.slots.borrow_mut();
@@ -955,10 +1129,14 @@ impl PendingRequests {
         };
         let slot = {
             let mut slots = self.slots.borrow_mut();
-            if slots
-                .get(reply.request_id())
-                .is_some_and(|slot| slot.borrow().expected == reply.kind())
-            {
+            if slots.get(reply.request_id()).is_some_and(|slot| {
+                let slot = slot.borrow();
+                slot.expected == reply.kind()
+                    && slot
+                        .attention_target
+                        .as_ref()
+                        .is_none_or(|target| target.matches(&reply))
+            }) {
                 slots.remove(reply.request_id())
             } else {
                 None
@@ -1049,6 +1227,8 @@ enum ReplyKind {
     History,
     Sent,
     Cancelled,
+    AgentAttentionCleared,
+    WorkspaceAttentionCleared,
     RpcError,
 }
 
@@ -1069,6 +1249,8 @@ impl ReplyKind {
             Self::History => "fetch_agent_timeline_request",
             Self::Sent => "send_agent_message_request",
             Self::Cancelled => "cancel_agent_request",
+            Self::AgentAttentionCleared => "clear_agent_attention",
+            Self::WorkspaceAttentionCleared => "workspace.clear_attention.request",
             Self::RpcError => "",
         }
     }
@@ -1089,6 +1271,8 @@ enum PendingReply {
     History(History),
     Sent(Sent),
     Cancelled(Cancelled),
+    AgentAttentionCleared(AgentAttentionCleared),
+    WorkspaceAttentionCleared(WorkspaceAttentionCleared),
     RpcError(RpcError),
 }
 
@@ -1122,6 +1306,8 @@ impl PendingReply {
             Self::History(_) => ReplyKind::History,
             Self::Sent(_) => ReplyKind::Sent,
             Self::Cancelled(_) => ReplyKind::Cancelled,
+            Self::AgentAttentionCleared(_) => ReplyKind::AgentAttentionCleared,
+            Self::WorkspaceAttentionCleared(_) => ReplyKind::WorkspaceAttentionCleared,
             Self::RpcError(_) => ReplyKind::RpcError,
         }
     }
@@ -1142,6 +1328,8 @@ impl PendingReply {
             Self::History(value) => &value.request_id,
             Self::Sent(value) => &value.request_id,
             Self::Cancelled(value) => &value.request_id,
+            Self::AgentAttentionCleared(value) => &value.request_id,
+            Self::WorkspaceAttentionCleared(value) => &value.request_id,
             Self::RpcError(value) => &value.request_id,
         }
     }
@@ -1254,6 +1442,150 @@ mod tests {
             })
             .unwrap()["frame"]
             .clone()
+    }
+
+    fn attention_frame(request_id: &str) -> Value {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../protocol-fixtures/attention-schema.json"
+        ))
+        .unwrap();
+        cases
+            .into_iter()
+            .find(|case| {
+                case["direction"] == "server"
+                    && case["frame"]["message"]["payload"]["requestId"] == request_id
+            })
+            .unwrap()["frame"]
+            .clone()
+    }
+
+    #[test]
+    fn attention_agent_reply_requires_request_kind_target_and_snapshot_identity() {
+        let pending = Rc::new(PendingRequests::default());
+        let (_guard, response) = pending
+            .register_target(
+                "attention-agent-clear".into(),
+                ReplyKind::AgentAttentionCleared,
+                Some(AttentionTarget::Agent("attention-agent".into())),
+            )
+            .unwrap();
+        let mut response = pin!(response);
+        let mut cx = Context::from_waker(Waker::noop());
+        let correct = attention_frame("attention-agent-clear");
+        for field in ["requestId", "agentId"] {
+            let mut wrong = correct.clone();
+            wrong["message"]["payload"][field] = json!("other");
+            pending.dispatch(event(&wrong)).unwrap();
+            assert!(response.as_mut().poll(&mut cx).is_pending());
+        }
+        let mut wrong = correct.clone();
+        wrong["message"]["payload"]["agents"][0]["id"] = json!("other-agent");
+        pending.dispatch(event(&wrong)).unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
+        let mut wrong = attention_frame("attention-workspace-clear");
+        wrong["message"]["payload"]["requestId"] = json!("attention-agent-clear");
+        pending.dispatch(event(&wrong)).unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
+        let mut array_target = correct;
+        array_target["message"]["payload"]["agentId"] = json!(["attention-agent"]);
+        pending.dispatch(event(&array_target)).unwrap();
+        let Poll::Ready(Ok(PendingReply::AgentAttentionCleared(reply))) =
+            response.as_mut().poll(&mut cx)
+        else {
+            panic!("missing attention reply");
+        };
+        assert_eq!(reply.agents[0].agent.id, "attention-agent");
+        assert!(pending.slots.borrow().is_empty());
+    }
+
+    #[test]
+    fn attention_workspace_reply_checks_each_result_target_and_returns_backend_errors() {
+        let pending = Rc::new(PendingRequests::default());
+        let (_guard, response) = pending
+            .register_target(
+                "attention-workspace-failed".into(),
+                ReplyKind::WorkspaceAttentionCleared,
+                Some(AttentionTarget::Workspace("attention-workspace".into())),
+            )
+            .unwrap();
+        let mut response = pin!(response);
+        let mut cx = Context::from_waker(Waker::noop());
+        let correct = attention_frame("attention-workspace-failed");
+        let mut wrong = correct.clone();
+        wrong["message"]["payload"]["workspaceId"] = json!(["attention-workspace", "other"]);
+        pending.dispatch(event(&wrong)).unwrap();
+        let mut wrong = correct.clone();
+        wrong["message"]["payload"]["results"][0]["workspaceId"] = json!("other");
+        pending.dispatch(event(&wrong)).unwrap();
+        let mut wrong = correct.clone();
+        wrong["message"]["payload"]["results"] = json!([]);
+        pending.dispatch(event(&wrong)).unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
+        pending.dispatch(event(&correct)).unwrap();
+        let Poll::Ready(Ok(PendingReply::WorkspaceAttentionCleared(reply))) =
+            response.as_mut().poll(&mut cx)
+        else {
+            panic!("missing attention reply");
+        };
+        let error = workspace_attention_result(reply).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Workspace not found: attention-workspace"
+        );
+        assert_eq!(format!("{error:?}"), "ConversationError::Backend");
+        let mut successful = attention_frame("attention-workspace-clear");
+        let reply: WorkspaceAttentionCleared =
+            serde_json::from_value(successful["message"]["payload"].clone()).unwrap();
+        assert_eq!(
+            workspace_attention_result(reply)
+                .ok()
+                .unwrap()
+                .cleared_agent_ids,
+            ["attention-agent"]
+        );
+        successful["message"]["payload"]["success"] = json!(false);
+        successful["message"]["payload"]["results"][0]["success"] = json!(false);
+        successful["message"]["payload"]["results"][0]["error"] = json!("Provider detail");
+        let reply = serde_json::from_value(successful["message"]["payload"].clone()).unwrap();
+        assert_eq!(
+            workspace_attention_result(reply).err().unwrap().to_string(),
+            "Provider detail"
+        );
+    }
+
+    #[test]
+    fn attention_rpc_error_uses_request_type_and_late_attention_replies_do_not_create_subscriptions()
+     {
+        let pending = Rc::new(PendingRequests::default());
+        let (guard, response) = pending
+            .register_target(
+                "attention-agent-clear".into(),
+                ReplyKind::AgentAttentionCleared,
+                Some(AttentionTarget::Agent("attention-agent".into())),
+            )
+            .unwrap();
+        let mut response = pin!(response);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut failure = json!({"type":"session","message":{"type":"rpc_error","payload":{
+            "requestId":"attention-agent-clear","requestType":"workspace.clear_attention.request","error":"Original backend error"}}});
+        pending.dispatch(event(&failure)).unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
+        failure["message"]["payload"]["requestType"] = json!("clear_agent_attention");
+        pending.dispatch(event(&failure)).unwrap();
+        let Poll::Ready(Ok(PendingReply::RpcError(error))) = response.as_mut().poll(&mut cx) else {
+            panic!("missing RPC error");
+        };
+        assert_eq!(
+            ConversationError::Rpc(error).to_string(),
+            "Original backend error"
+        );
+        drop(guard);
+        pending
+            .dispatch(event(&attention_frame("attention-agent-clear")))
+            .unwrap();
+        assert!(pending.slots.borrow().is_empty());
+        assert!(pending.active_subscriptions.borrow().is_empty());
+        assert!(pending.buffered_subscriptions.borrow().is_empty());
     }
 
     fn stream_frame(agent_id: &str, subscription_id: Option<&str>) -> Value {

@@ -1,0 +1,174 @@
+[
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "clear_agent_attention",
+        "requestId": "attention-agent-clear",
+        "agentId": "attention-agent"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "clear_agent_attention_response",
+        "payload": {
+          "requestId": "attention-agent-clear",
+          "agentId": "attention-agent",
+          "agents": [
+            {
+              "id": "attention-agent",
+              "provider": "codex",
+              "cwd": "/fixture/project",
+              "workspaceId": "wks_60c9c41574aed06e",
+              "model": "gpt-5.4-mini",
+              "thinkingOptionId": null,
+              "effectiveThinkingOptionId": null,
+              "runtimeInfo": {
+                "provider": "codex",
+                "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "model": "gpt-5.4-mini",
+                "modeId": "full-access"
+              },
+              "createdAt": "2026-11-06T04:27:58.799Z",
+              "updatedAt": "2026-11-06T04:27:58.800Z",
+              "lastUserMessageAt": null,
+              "status": "idle",
+              "activeTurn": null,
+              "capabilities": {
+                "supportsStreaming": true,
+                "supportsSessionPersistence": true,
+                "supportsDynamicModes": true,
+                "supportsMcpServers": false,
+                "supportsReasoningStream": true,
+                "supportsToolInvocations": true,
+                "supportsRewindConversation": false,
+                "supportsRewindFiles": false,
+                "supportsRewindBoth": false
+              },
+              "currentModeId": "full-access",
+              "availableModes": [
+                {
+                  "id": "bypassPermissions",
+                  "label": "Bypass",
+                  "description": "No permissions"
+                },
+                {
+                  "id": "default",
+                  "label": "Default",
+                  "description": "Ask for permissions"
+                },
+                {
+                  "id": "full-access",
+                  "label": "Full access",
+                  "description": "No prompts"
+                },
+                {
+                  "id": "auto",
+                  "label": "Auto",
+                  "description": "Ask/allow based on policy"
+                },
+                {
+                  "id": "always-ask",
+                  "label": "Always Ask",
+                  "description": "Always prompt"
+                }
+              ],
+              "features": [
+                {
+                  "type": "toggle",
+                  "id": "test_feature",
+                  "label": "Test feature",
+                  "description": "Deterministic provider feature used by MCP integration tests.",
+                  "value": false
+                }
+              ],
+              "pendingPermissions": [],
+              "persistence": {
+                "provider": "codex",
+                "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "metadata": {
+                  "conversationId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                  "cwd": "/fixture/project"
+                }
+              },
+              "title": "Conversation fixture",
+              "labels": {},
+              "archivedAt": null,
+              "requiresAttention": false,
+              "attentionReason": null,
+              "attentionTimestamp": null
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "workspace.clear_attention.request",
+        "requestId": "attention-workspace-clear",
+        "workspaceId": "attention-workspace"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "workspace.clear_attention.response",
+        "payload": {
+          "requestId": "attention-workspace-clear",
+          "workspaceId": "attention-workspace",
+          "clearedAgentIds": [
+            "attention-agent"
+          ],
+          "results": [
+            {
+              "workspaceId": "attention-workspace",
+              "clearedAgentIds": [
+                "attention-agent"
+              ],
+              "success": true,
+              "error": null
+            }
+          ],
+          "success": true,
+          "error": null
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "workspace.clear_attention.response",
+        "payload": {
+          "requestId": "attention-workspace-failed",
+          "workspaceId": "attention-workspace",
+          "clearedAgentIds": [],
+          "results": [
+            {
+              "workspaceId": "attention-workspace",
+              "clearedAgentIds": [],
+              "success": false,
+              "error": "Workspace not found: attention-workspace"
+            }
+          ],
+          "success": false,
+          "error": "Workspace not found: attention-workspace"
+        }
+      }
+    }
+  }
+]

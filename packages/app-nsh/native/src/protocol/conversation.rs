@@ -250,6 +250,62 @@ pub(crate) fn cancel_agent(request_id: &str, agent_id: &str) -> String {
     session(json!({"type":"cancel_agent_request","requestId":request_id,"agentId":agent_id}))
 }
 
+pub(crate) fn clear_agent_attention(request_id: &str, agent_id: &str) -> String {
+    session(json!({"type":"clear_agent_attention","requestId":request_id,"agentId":agent_id}))
+}
+
+pub(crate) fn clear_workspace_attention(request_id: &str, workspace_id: &str) -> String {
+    session(
+        json!({"type":"workspace.clear_attention.request","requestId":request_id,"workspaceId":workspace_id}),
+    )
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+pub(crate) enum AttentionIds {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl AttentionIds {
+    pub(crate) fn is_single(&self, target: &str) -> bool {
+        match self {
+            Self::One(id) => id == target,
+            Self::Many(ids) => ids.len() == 1 && ids[0] == target,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentAttentionCleared {
+    pub(crate) request_id: String,
+    pub(crate) agent_id: AttentionIds,
+    pub(crate) agents: Vec<Snapshot>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceAttentionResult {
+    pub(crate) workspace_id: String,
+    pub(crate) cleared_agent_ids: Vec<String>,
+    pub(crate) success: bool,
+    #[serde(deserialize_with = "nullable")]
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceAttentionCleared {
+    pub(crate) request_id: String,
+    pub(crate) workspace_id: AttentionIds,
+    pub(crate) cleared_agent_ids: Vec<String>,
+    pub(crate) results: Vec<WorkspaceAttentionResult>,
+    pub(crate) success: bool,
+    #[serde(deserialize_with = "nullable")]
+    pub(crate) error: Option<String>,
+}
+
 pub(crate) fn respond_permission(
     agent_id: &str,
     permission_request_id: &str,
@@ -272,6 +328,8 @@ pub(crate) enum ConversationMessage {
     History(History),
     Sent(Sent),
     Cancelled(Cancelled),
+    AgentAttentionCleared(AgentAttentionCleared),
+    WorkspaceAttentionCleared(WorkspaceAttentionCleared),
     Stream(Stream),
     PermissionRequested(PermissionRequested),
     PermissionResolved(PermissionResolved),
@@ -293,6 +351,8 @@ impl ConversationMessage {
             Self::History(v) => &v.request_id,
             Self::Sent(v) => &v.request_id,
             Self::Cancelled(v) => &v.request_id,
+            Self::AgentAttentionCleared(v) => &v.request_id,
+            Self::WorkspaceAttentionCleared(v) => &v.request_id,
             Self::RpcError(v) => &v.request_id,
             // PermissionResolved.requestId is a permission identity, never a pending RPC ID.
             _ => return None,
@@ -324,6 +384,12 @@ pub(crate) fn parse_message(
         "fetch_agent_timeline_response" => ConversationMessage::History(decode(payload)?),
         "send_agent_message_response" => ConversationMessage::Sent(decode(payload)?),
         "cancel_agent_response" => ConversationMessage::Cancelled(decode(payload)?),
+        "clear_agent_attention_response" => {
+            ConversationMessage::AgentAttentionCleared(decode(payload)?)
+        }
+        "workspace.clear_attention.response" => {
+            ConversationMessage::WorkspaceAttentionCleared(decode(payload)?)
+        }
         "agent_stream" => ConversationMessage::Stream(decode(payload)?),
         "agent_permission_request" => ConversationMessage::PermissionRequested(decode(payload)?),
         "agent_permission_resolved" => ConversationMessage::PermissionResolved(decode(payload)?),
@@ -1339,9 +1405,93 @@ mod tests {
             Some(ActiveTurnBehavior::Steer),
         )));
         // The parent runs Rust tests first, then validates these actual serialized Rust frames with Zod.
+        exported.push(wire(clear_agent_attention(
+            "attention-agent-clear",
+            "attention-agent",
+        )));
+        exported.push(wire(clear_workspace_attention(
+            "attention-workspace-clear",
+            "attention-workspace",
+        )));
         if let Ok(path) = std::env::var("PASEO_CONVERSATION_REQUESTS_OUT") {
             std::fs::write(path, serde_json::to_string_pretty(&exported).unwrap()).unwrap();
         }
+    }
+
+    #[test]
+    fn attention_wire_matches_shared_source_schema_cases_and_preserves_snapshots() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/attention-schema.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            wire(clear_agent_attention(
+                "attention-agent-clear",
+                "attention-agent"
+            )),
+            cases[0]["frame"]
+        );
+        assert_eq!(
+            wire(clear_workspace_attention(
+                "attention-workspace-clear",
+                "attention-workspace"
+            )),
+            cases[2]["frame"]
+        );
+        for case in cases.iter().filter(|case| case["direction"] == "server") {
+            let message = &case["frame"]["message"];
+            let parsed = parse_message(
+                message["type"].as_str().unwrap(),
+                message["payload"].clone(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                parsed.request_id(),
+                message["payload"]["requestId"].as_str()
+            );
+        }
+        let mut agent = cases[1]["frame"]["message"]["payload"].clone();
+        agent["agentId"] = json!(["attention-agent"]);
+        let permission = timeline()
+            .into_iter()
+            .find(|case| {
+                case["frame"]["message"]["payload"]["event"]["type"] == "permission_requested"
+            })
+            .unwrap()["frame"]["message"]["payload"]["event"]["request"]
+            .clone();
+        agent["agents"][0]["pendingPermissions"] = json!([permission]);
+        let decoded: AgentAttentionCleared = decode(agent.clone()).unwrap();
+        assert!(decoded.agent_id.is_single("attention-agent"));
+        assert_eq!(
+            decoded.agents[0].pending_permissions[0].id,
+            "fixture-permission"
+        );
+        for field in ["requestId", "agentId", "agents"] {
+            let mut invalid = agent.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(decode::<AgentAttentionCleared>(invalid).is_err());
+        }
+        let workspace = cases[3]["frame"]["message"]["payload"].clone();
+        for field in [
+            "requestId",
+            "workspaceId",
+            "clearedAgentIds",
+            "results",
+            "success",
+            "error",
+        ] {
+            let mut invalid = workspace.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(decode::<WorkspaceAttentionCleared>(invalid).is_err());
+        }
+        for field in ["workspaceId", "clearedAgentIds", "success", "error"] {
+            let mut invalid = workspace.clone();
+            invalid["results"][0].as_object_mut().unwrap().remove(field);
+            assert!(decode::<WorkspaceAttentionCleared>(invalid).is_err());
+        }
+        assert!(decode::<AttentionIds>(Value::Null).is_err());
+        assert!(decode::<AttentionIds>(json!([1])).is_err());
     }
 
     #[test]
