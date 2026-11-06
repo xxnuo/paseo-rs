@@ -126,8 +126,9 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 ## Current evidence
 
 Rust-first feasibility: `native` is an independent Cargo workspace using the
-local NSH checkout. Eleven host/protocol unit tests and four Rust-only headless
-input flows pass, as does clippy with warnings denied. The Rust-root GTK input flow
+local NSH checkout. The current Rust suite passes 29 tests (22 unit, two socket
+lifecycle flows and five host-form flows). The connection implementation passed
+clippy with warnings denied before adding the terminal drawing probe. The Rust-root GTK input flow
 passes under Xvfb; `cargo check --target wasm32-unknown-unknown --lib` passes.
 The Rust-root test also passes in a real headless Chrome browser using the
 generated Rust WASM runtime (`nsh test .../probes/rust-root.test.ts --target web`).
@@ -150,8 +151,7 @@ The Rust WebSocket extension is integrated on NSH topic branch
 pass (18, one child-process helper ignored), after correcting tests to use a
 real reactive root instead of `Owner::detached()` (which means no owner).
 Host/browser close now rejects cancellation and abnormal transport failures.
-Engine WebSocket tests passed (14) before that final close-error correction;
-the final engine/platform matrix still needs rerunning.
+Engine WebSocket tests also pass on the integrated final code (14).
 
 `native/src/client.rs` is wired to the Rust root and performs bounded handshake
 and correlated project-list RPC. Native GTK under Xvfb passed a real isolated
@@ -162,12 +162,31 @@ and accepts an explicit app directory so the isolated dependency fixture can
 exercise the main Rust application. Connecting can be cancelled before the
 handshake; a Rust UI test verifies the transport is released.
 
-Known current connection limitation: idle sockets have no continuously running
-event reader yet, so an unsolicited disconnect is noticed at the next RPC.
-The background event dispatcher and live connection state are required before
-the host/session lifecycle item can be marked complete. The first Android
-runtime built successfully; its app build crossed an NSH source update and
-failed with a missing `Core::set_system`, so Android is not verified yet.
+The client now has a continuously running event reader, correlated project
+requests, timeout/cancellation guards and generation-checked connection callbacks.
+Deterministic transport tests verify idle disconnect updates the UI and disposing
+the root releases a socket with a pending read. These are not reconnect/history
+acceptance tests.
+
+Android API 36 x86_64 emulator: the actual Rust-root native address-input test
+passes. NSH test tooling now compiles and packages the selected device ABI only;
+the prior APK accidentally retained a second architecture and exceeded available
+device storage. This smoke test does not cover Android daemon RPC, IME or audio.
+
+The Web WASM runtime builds and wasm-bindgen 0.2.130 runs successfully. A real
+daemon UI test using the separate NSH dev-server page fails to connect; the
+daemon's existing origin check rejects that cross-origin development setup.
+The next browser acceptance runner must serve the packaged WASM site through
+the real daemon, preserving same-origin security rather than allowing all origins.
+The exact tool is installed separately under `.cache/paseo-nsh/wasm-bindgen-0.2.130`
+and selected with `NSH_WASM_BINDGEN`, leaving the system's older tool intact.
+
+`TerminalProbe` is a separate registered Rust root for fixed-grid drawing only.
+It reads the upstream Android grapheme fixture directly, validates UTF-16 cell
+offsets/styles and compares per-cell placement to whole-row shaping. Its four
+unit tests pass; it is not a VT parser or live terminal. The production daemon
+streams ANSI output/replay, not ongoing character-grid snapshots, so preserving
+terminal behavior still needs a VT implementation and verified glyph placement.
 
 ```sh
 cargo test --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target
