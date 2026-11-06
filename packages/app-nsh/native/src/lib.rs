@@ -17,8 +17,15 @@ pub fn App() -> impl IntoElement {
     let address = signal(String::new());
     let status = signal(String::new());
     let check = move || {
-        status.set(match host::normalize_host_url(&address.get_untracked()) {
-            Ok(url) => format!("地址有效：{}", host::host_url_label(&url)),
+        status.set(match host::parse_direct_host(&address.get_untracked()) {
+            Ok(host) => {
+                let _transport_url = host.url;
+                if host.password.is_some() {
+                    format!("地址有效（需要密码认证）：{}", host.label)
+                } else {
+                    format!("地址有效：{}", host.label)
+                }
+            }
             Err(error) => error,
         });
     };

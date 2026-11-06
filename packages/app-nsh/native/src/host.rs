@@ -5,8 +5,65 @@ const INVALID_HOST: &str = "主机地址无效，请使用 host:port、端口号
 /// Supports the password-free direct-address subset of protocol/src/host-target.ts.
 /// Password query parameters are rejected; SSH, local sockets and pairing URLs are unsupported.
 /// The returned transport URL can contain tokens; display host_url_label instead.
+#[cfg(test)]
 pub(crate) fn normalize_host_url(input: &str) -> Result<String, String> {
-    normalize(input.trim()).ok_or_else(|| INVALID_HOST.to_owned())
+    if Url::parse(input.trim())
+        .ok()
+        .is_some_and(|url| url.query_pairs().any(|(key, _)| key == "password"))
+    {
+        return Err(INVALID_HOST.to_owned());
+    }
+    parse_direct_host(input).map(|host| host.url)
+}
+
+/// Parsed credentials stay separate from transport addresses and display labels.
+/// Deliberately no Debug: even unknown proxy query parameters may be secrets.
+pub(crate) struct ParsedHost {
+    pub(crate) url: String,
+    pub(crate) password: Option<String>,
+    pub(crate) label: String,
+}
+
+pub(crate) fn parse_direct_host(input: &str) -> Result<ParsedHost, String> {
+    let input = input.trim();
+    let mut password = None;
+    let sanitized =
+        if input.starts_with("ws://") || input.starts_with("wss://") || input.starts_with("tcp://")
+        {
+            let mut parsed = Url::parse(input).map_err(|_| INVALID_HOST.to_owned())?;
+            let mut pairs = Vec::new();
+            let mut found = false;
+            for (key, value) in parsed.query_pairs() {
+                if key == "password" {
+                    if !found {
+                        password = Some(value.into_owned());
+                        found = true;
+                    }
+                } else {
+                    pairs.push((key.into_owned(), value.into_owned()));
+                }
+            }
+            if input.starts_with("tcp://") && password.as_deref() == Some("") {
+                password = None;
+            }
+            parsed.set_query(None);
+            if !pairs.is_empty() {
+                parsed.query_pairs_mut().extend_pairs(pairs);
+            }
+            parsed.to_string()
+        } else {
+            input.to_owned()
+        };
+    let url = normalize(&sanitized).ok_or_else(|| INVALID_HOST.to_owned())?;
+    let label = Url::parse(&url)
+        .map_err(|_| INVALID_HOST.to_owned())?
+        .origin()
+        .ascii_serialization();
+    Ok(ParsedHost {
+        url,
+        password,
+        label,
+    })
 }
 
 fn normalize(input: &str) -> Option<String> {
@@ -95,6 +152,7 @@ fn is_credential_free(url: &Url) -> bool {
 }
 
 /// Hide paths and query parameters, which may contain proxy credentials.
+#[cfg(test)]
 pub(crate) fn host_url_label(input: &str) -> String {
     normalize(input.trim())
         .and_then(|normalized| Url::parse(&normalized).ok())
@@ -105,6 +163,30 @@ pub(crate) fn host_url_label(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separates_passwords_without_losing_proxy_parameters() {
+        let host = parse_direct_host(
+            "wss://example.com/a%2Fb?pass%77ord=a%2Bb+c&password=second&token=a%20b&x=~",
+        )
+        .unwrap();
+        assert_eq!(host.password.as_deref(), Some("a+b c"));
+        assert_eq!(host.url, "wss://example.com/a%2Fb?token=a+b&x=%7E");
+        assert_eq!(host.label, "wss://example.com");
+        let empty = parse_direct_host("ws://example.com?password=&password=second").unwrap();
+        assert_eq!(empty.password.as_deref(), Some(""));
+        assert_eq!(empty.url, "ws://example.com/ws");
+        let tcp = parse_direct_host("tcp://example.com:443?ssl=true&password=secret&token=ignored")
+            .unwrap();
+        assert_eq!(tcp.password.as_deref(), Some("secret"));
+        assert_eq!(tcp.url, "wss://example.com/ws");
+        assert!(
+            parse_direct_host("tcp://example.com:443?password=")
+                .unwrap()
+                .password
+                .is_none()
+        );
+    }
 
     #[test]
     fn normalizes_direct_addresses_like_the_upstream_connector() {

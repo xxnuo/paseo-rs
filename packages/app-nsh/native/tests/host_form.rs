@@ -44,3 +44,17 @@ fn invalid_address_shows_a_safe_error() {
             .shows("text:地址有效：ws://user:secret@localhost")
     );
 }
+
+#[test]
+fn password_address_reports_authentication_without_echoing_the_secret() {
+    let mut app = Headless::start(EngineConfig::new(Root::of::<paseo_nsh::App>())).unwrap();
+    app.wait_for("连接开发主机").unwrap();
+    app.type_text(
+        "label:主机地址",
+        "wss://example.com/private?password=secret&token=proxy",
+    )
+    .unwrap();
+    app.press("role:button[检查地址]").unwrap();
+    app.wait_for("地址有效（需要密码认证）：wss://example.com")
+        .unwrap();
+}
