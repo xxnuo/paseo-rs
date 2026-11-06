@@ -126,8 +126,8 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 ## Current evidence
 
 Rust-first feasibility: `native` is an independent Cargo workspace using the
-local NSH checkout. Four parser unit tests and three Rust-only headless input
-flows pass, as does clippy with warnings denied. The Rust-root GTK input flow
+local NSH checkout. Eleven host/protocol unit tests and four Rust-only headless
+input flows pass, as does clippy with warnings denied. The Rust-root GTK input flow
 passes under Xvfb; `cargo check --target wasm32-unknown-unknown --lib` passes.
 The Rust-root test also passes in a real headless Chrome browser using the
 generated Rust WASM runtime (`nsh test .../probes/rust-root.test.ts --target web`).
@@ -141,6 +141,17 @@ tracks the direct-address subset of `packages/protocol/src/host-target.ts`.
 hello, server_info and project-list frames. Its Node test validates both wire
 directions against the existing protocol validators; the Rust client must not
 copy the reference SDK's advertised capability list before implementing it.
+`timeline.json` additionally captures actual user/assistant/tool/permission
+stream events and projected history, checked against upstream validators. The
+wire protocol sends timeline items, not the provider-internal `text_delta` event.
+
+The Rust WebSocket extension is isolated in NSH worktree
+`nsh.worktrees/paseo-websocket`, branch `core/paseo-websocket`. Initial engine
+integration tests pass (14), but three core lifecycle/quota tests failed and
+are under repair; this API is not yet integrated into the app dependency.
+`native/src/client.rs` contains the pending bounded handshake/project RPC
+implementation and is not yet wired to the product root. Protocol fixture
+parsing is currently test-only until the transport gate passes.
 
 ```sh
 cargo test --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target

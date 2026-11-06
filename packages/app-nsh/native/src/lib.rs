@@ -23,7 +23,7 @@ pub fn App() -> impl IntoElement {
             Ok(host) => {
                 let _transport_url = host.url;
                 if host.password.is_some() {
-                    format!("地址有效（需要密码认证）：{}", host.label)
+                    format!("地址有效（已提供密码）：{}", host.label)
                 } else {
                     format!("地址有效：{}", host.label)
                 }

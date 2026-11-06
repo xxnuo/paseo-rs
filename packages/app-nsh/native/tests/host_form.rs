@@ -55,6 +55,6 @@ fn password_address_reports_authentication_without_echoing_the_secret() {
     )
     .unwrap();
     app.press("role:button[检查地址]").unwrap();
-    app.wait_for("地址有效（需要密码认证）：wss://example.com")
+    app.wait_for("地址有效（已提供密码）：wss://example.com")
         .unwrap();
 }
