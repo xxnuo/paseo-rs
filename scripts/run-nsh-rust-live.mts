@@ -432,6 +432,8 @@ try {
       'printf "ok" > nsh-chat-cancelled.txt; Respond with exactly: NSH_CHAT_CANCEL_UNEXPECTED',
     after: "Respond with exactly: NSH_CHAT_AFTER_CANCEL",
     afterReply: "NSH_CHAT_AFTER_CANCEL",
+    afterReconnect: "Respond with exactly: NSH_CHAT_AFTER_RECONNECT",
+    afterReconnectReply: "NSH_CHAT_AFTER_RECONNECT",
     allow: permissionActions[0],
     deny: permissionActions[1],
   };
@@ -591,6 +593,29 @@ try {
     assert.equal(refreshed?.pendingPermissions.length, 0);
     assert.equal(refreshed?.cwd, worktreeCwd);
     assert.equal(refreshed?.workspaceId, workspace.id);
+  };
+  const verifyRecoveredSend = async () => {
+    const fetched = await completeTimeline(worktreeAgent);
+    assert.equal(
+      startedPrompts.filter((prompt) => prompt === chat.afterReconnect).length,
+      1,
+      "The recovered input/send controls must start exactly one new turn",
+    );
+    assert.equal(
+      fetched.entries.filter(
+        (entry) => entry.item.type === "user_message" && entry.item.text === chat.afterReconnect,
+      ).length,
+      1,
+      "The message sent after reconnect must persist exactly once",
+    );
+    assert.equal(
+      fetched.entries.filter(
+        (entry) =>
+          entry.item.type === "assistant_message" && entry.item.text === chat.afterReconnectReply,
+      ).length,
+      1,
+      "The reply after reconnect must persist exactly once",
+    );
   };
   console.log("Rust UI fixture: real loopback daemon and SDK seed, fake Codex provider (no model)");
   if (command === "--fixture-only") {
@@ -757,6 +782,16 @@ try {
           ),
         );
         await verifyRecovery();
+        assert.equal(
+          (
+            await resumed.agents.ref(worktreeAgent.id).run(chat.afterReconnect, {
+              clientMessageId: randomUUID(),
+              timeoutMs: 10_000,
+            })
+          ).status,
+          "idle",
+        );
+        await verifyRecoveredSend();
       } finally {
         await Promise.allSettled([probe.close(), resumed?.close()]);
       }
@@ -776,6 +811,7 @@ try {
         historyPages: history.pages,
         chatSendToolPermissionCancelVerified: true,
         exactSocketDisconnectAndAfterCatchupVerified: true,
+        sendAfterReconnectVerified: true,
         daemonRestartTested: false,
         fixture: "ready",
         rustUiExecuted: false,
@@ -792,6 +828,10 @@ try {
     await mkdir(path.dirname(failureScreenshot), { recursive: true });
     const permissionScreenshot = failureScreenshot.replace("project-connect-", "chat-permission-");
     const conversationScreenshot = failureScreenshot.replace("project-connect-", "chat-complete-");
+    const recoveredScreenshot = failureScreenshot.replace(
+      "project-connect-",
+      "chat-recovered-before-send-",
+    );
     await writeFile(
       testFile,
       `import { expect, open, test } from "nsh/test";
@@ -1001,7 +1041,14 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   expect(app.storage()["paseo.nsh.client-id"]).toBe(clientId);
   expect(app.enabled(send)).toBe(true);
   await revealMessage("text:" + offline.reply, 1);
-  await loadEarlier("text:" + offline.reply, reconnectCount + 2);
+  if (${target !== "headless"}) {
+    await app.screenshot(${JSON.stringify(recoveredScreenshot)});
+    console.log("Recovered composer before sending: " + ${JSON.stringify(recoveredScreenshot)});
+  }
+  await sendMessage(chat.afterReconnect);
+  await revealMessage("text:" + chat.afterReconnectReply, 1);
+  await waitIdle();
+  await loadEarlier("text:" + chat.afterReconnectReply, reconnectCount + 4);
   await revealMessage("text:" + chat.afterReply, -1);
   await app.clear(message);
   await app.press(returnDetail);
@@ -1043,7 +1090,8 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   await app.press(disconnect);
   await app.waitFor("text:已断开连接");
   expect(app.shows(project)).toBe(false);
-}, 300000);
+// Full history scrolling plus the recovered native send need a larger overall budget on Android.
+}, 420000);
 `,
       { flag: "wx" },
     );
@@ -1083,7 +1131,8 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
       };
       child.stdout.on("data", observeOutput(process.stdout));
       child.stderr.on("data", observeOutput(process.stderr));
-      const timeout = setTimeout(() => child.kill("SIGKILL"), 420_000);
+      // Includes the host build and full retained-history round trips; individual waits keep their limits.
+      const timeout = setTimeout(() => child.kill("SIGKILL"), 540_000);
       const interrupt = () => child.kill("SIGTERM");
       const cleanup = () => {
         clearTimeout(timeout);
@@ -1131,6 +1180,7 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
     }
     await verifyChat();
     await verifyRecovery();
+    await verifyRecoveredSend();
     console.log(
       "Rust UI creation verified by SDK: two unique worktree Agents, defaults and explicit options",
     );
