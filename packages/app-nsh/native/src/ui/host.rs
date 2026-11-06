@@ -241,7 +241,7 @@ pub(crate) fn screen() -> impl IntoElement {
                 )
                 .child(
                     button()
-                        .disabled(move || busy.get() || !connected.get())
+                        .disabled(move || !busy.get() && !connected.get())
                         .on_press(move || state.disconnect())
                         .p_3()
                         .child(text("断开连接").text_color(move || theme().primary)),

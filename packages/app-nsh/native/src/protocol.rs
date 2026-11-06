@@ -69,6 +69,7 @@ pub(crate) fn list_projects(request_id: &str) -> String {
 }
 
 // No Debug: an unknown frame may contain credentials and must never be dumped into logs or UI.
+#[allow(dead_code)] // Preserve unhandled frames without exposing them in diagnostics.
 pub(crate) enum ServerEvent {
     ServerInfo(ServerInfo),
     Projects(ProjectList),
@@ -79,6 +80,7 @@ pub(crate) enum ServerEvent {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // Validate known wire fields even when this screen consumes only a subset.
 pub(crate) struct ServerInfo {
     #[serde(deserialize_with = "nonempty_string")]
     pub(crate) server_id: String,
@@ -101,6 +103,7 @@ pub(crate) struct ProjectList {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // Validate known wire fields even when this screen consumes only a subset.
 pub(crate) struct Project {
     pub(crate) project_id: String,
     pub(crate) project_display_name: String,

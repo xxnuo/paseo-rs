@@ -145,13 +145,29 @@ copy the reference SDK's advertised capability list before implementing it.
 stream events and projected history, checked against upstream validators. The
 wire protocol sends timeline items, not the provider-internal `text_delta` event.
 
-The Rust WebSocket extension is isolated in NSH worktree
-`nsh.worktrees/paseo-websocket`, branch `core/paseo-websocket`. Initial engine
-integration tests pass (14), but three core lifecycle/quota tests failed and
-are under repair; this API is not yet integrated into the app dependency.
-`native/src/client.rs` contains the pending bounded handshake/project RPC
-implementation and is not yet wired to the product root. Protocol fixture
-parsing is currently test-only until the transport gate passes.
+The Rust WebSocket extension is integrated on NSH topic branch
+`core/paseo-client-runtime` (`cec50a29`, `3e42e39e`). Core WebSocket tests now
+pass (18, one child-process helper ignored), after correcting tests to use a
+real reactive root instead of `Owner::detached()` (which means no owner).
+Host/browser close now rejects cancellation and abnormal transport failures.
+Engine WebSocket tests passed (14) before that final close-error correction;
+the final engine/platform matrix still needs rerunning.
+
+`native/src/client.rs` is wired to the Rust root and performs bounded handshake
+and correlated project-list RPC. Native GTK under Xvfb passed a real isolated
+daemon UI workflow: connect, show the seeded project, refresh, disconnect,
+reconnect and retain the persisted UUID identity. The daemon provider is fake;
+no model inference is implied. The runner is `scripts/run-nsh-rust-live.mts`,
+and accepts an explicit app directory so the isolated dependency fixture can
+exercise the main Rust application. Connecting can be cancelled before the
+handshake; a Rust UI test verifies the transport is released.
+
+Known current connection limitation: idle sockets have no continuously running
+event reader yet, so an unsolicited disconnect is noticed at the next RPC.
+The background event dispatcher and live connection state are required before
+the host/session lifecycle item can be marked complete. The first Android
+runtime built successfully; its app build crossed an NSH source update and
+failed with a missing `Core::set_system`, so Android is not verified yet.
 
 ```sh
 cargo test --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target
