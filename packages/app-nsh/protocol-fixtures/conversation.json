@@ -1,0 +1,1293 @@
+[
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "session.events.set_subscription.request",
+        "requestId": "chat-events",
+        "events": ["agent_permission_request", "agent_permission_resolved"],
+        "notifications": false
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "session.events.set_subscription.response",
+        "payload": {
+          "requestId": "chat-events",
+          "subscriptionId": "c9dc5711-1e0c-4a07-976c-138f71f064ca"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.create.request",
+        "idempotencyKey": "conversation-create",
+        "config": {
+          "provider": "codex",
+          "cwd": "/fixture/project",
+          "modeId": "full-access",
+          "title": "Conversation fixture"
+        },
+        "labels": {},
+        "requestId": "chat-create",
+        "subscribe": true
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.create.update",
+        "payload": {
+          "kind": "agent",
+          "idempotencyKey": "conversation-create",
+          "revision": 0,
+          "phase": "accepted",
+          "error": null,
+          "workspaceId": null,
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.create.update",
+        "payload": {
+          "kind": "agent",
+          "idempotencyKey": "conversation-create",
+          "revision": 1,
+          "phase": "agent_ready",
+          "error": null,
+          "workspaceId": "wks_60c9c41574aed06e",
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "agent": {
+            "id": "a5d676db-1f73-4124-ad3b-b30808873269",
+            "provider": "codex",
+            "cwd": "/fixture/project",
+            "workspaceId": "wks_60c9c41574aed06e",
+            "model": "gpt-5.4-mini",
+            "thinkingOptionId": null,
+            "effectiveThinkingOptionId": null,
+            "runtimeInfo": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "model": "gpt-5.4-mini",
+              "modeId": "full-access"
+            },
+            "createdAt": "2026-11-06T04:27:58.799Z",
+            "updatedAt": "2026-11-06T04:27:58.800Z",
+            "lastUserMessageAt": null,
+            "status": "idle",
+            "activeTurn": null,
+            "capabilities": {
+              "supportsStreaming": true,
+              "supportsSessionPersistence": true,
+              "supportsDynamicModes": true,
+              "supportsMcpServers": false,
+              "supportsReasoningStream": true,
+              "supportsToolInvocations": true,
+              "supportsRewindConversation": false,
+              "supportsRewindFiles": false,
+              "supportsRewindBoth": false
+            },
+            "currentModeId": "full-access",
+            "availableModes": [
+              {
+                "id": "bypassPermissions",
+                "label": "Bypass",
+                "description": "No permissions"
+              },
+              {
+                "id": "default",
+                "label": "Default",
+                "description": "Ask for permissions"
+              },
+              {
+                "id": "full-access",
+                "label": "Full access",
+                "description": "No prompts"
+              },
+              {
+                "id": "auto",
+                "label": "Auto",
+                "description": "Ask/allow based on policy"
+              },
+              {
+                "id": "always-ask",
+                "label": "Always Ask",
+                "description": "Always prompt"
+              }
+            ],
+            "features": [
+              {
+                "type": "toggle",
+                "id": "test_feature",
+                "label": "Test feature",
+                "description": "Deterministic provider feature used by MCP integration tests.",
+                "value": false
+              }
+            ],
+            "pendingPermissions": [],
+            "persistence": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "metadata": {
+                "conversationId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "cwd": "/fixture/project"
+              }
+            },
+            "title": "Conversation fixture",
+            "labels": {},
+            "archivedAt": null,
+            "requiresAttention": false,
+            "attentionReason": null,
+            "attentionTimestamp": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.create.update",
+        "payload": {
+          "kind": "agent",
+          "idempotencyKey": "conversation-create",
+          "revision": 2,
+          "phase": "completed",
+          "error": null,
+          "workspaceId": "wks_60c9c41574aed06e",
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "agent": {
+            "id": "a5d676db-1f73-4124-ad3b-b30808873269",
+            "provider": "codex",
+            "cwd": "/fixture/project",
+            "workspaceId": "wks_60c9c41574aed06e",
+            "model": "gpt-5.4-mini",
+            "thinkingOptionId": null,
+            "effectiveThinkingOptionId": null,
+            "runtimeInfo": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "model": "gpt-5.4-mini",
+              "modeId": "full-access"
+            },
+            "createdAt": "2026-11-06T04:27:58.799Z",
+            "updatedAt": "2026-11-06T04:27:58.800Z",
+            "lastUserMessageAt": null,
+            "status": "idle",
+            "activeTurn": null,
+            "capabilities": {
+              "supportsStreaming": true,
+              "supportsSessionPersistence": true,
+              "supportsDynamicModes": true,
+              "supportsMcpServers": false,
+              "supportsReasoningStream": true,
+              "supportsToolInvocations": true,
+              "supportsRewindConversation": false,
+              "supportsRewindFiles": false,
+              "supportsRewindBoth": false
+            },
+            "currentModeId": "full-access",
+            "availableModes": [
+              {
+                "id": "bypassPermissions",
+                "label": "Bypass",
+                "description": "No permissions"
+              },
+              {
+                "id": "default",
+                "label": "Default",
+                "description": "Ask for permissions"
+              },
+              {
+                "id": "full-access",
+                "label": "Full access",
+                "description": "No prompts"
+              },
+              {
+                "id": "auto",
+                "label": "Auto",
+                "description": "Ask/allow based on policy"
+              },
+              {
+                "id": "always-ask",
+                "label": "Always Ask",
+                "description": "Always prompt"
+              }
+            ],
+            "features": [
+              {
+                "type": "toggle",
+                "id": "test_feature",
+                "label": "Test feature",
+                "description": "Deterministic provider feature used by MCP integration tests.",
+                "value": false
+              }
+            ],
+            "pendingPermissions": [],
+            "persistence": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "metadata": {
+                "conversationId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "cwd": "/fixture/project"
+              }
+            },
+            "title": "Conversation fixture",
+            "labels": {},
+            "archivedAt": null,
+            "requiresAttention": false,
+            "attentionReason": null,
+            "attentionTimestamp": null
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.create.response",
+        "payload": {
+          "requestId": "chat-create",
+          "agent": {
+            "id": "a5d676db-1f73-4124-ad3b-b30808873269",
+            "provider": "codex",
+            "cwd": "/fixture/project",
+            "workspaceId": "wks_60c9c41574aed06e",
+            "model": "gpt-5.4-mini",
+            "thinkingOptionId": null,
+            "effectiveThinkingOptionId": null,
+            "runtimeInfo": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "model": "gpt-5.4-mini",
+              "modeId": "full-access"
+            },
+            "createdAt": "2026-11-06T04:27:58.799Z",
+            "updatedAt": "2026-11-06T04:27:58.800Z",
+            "lastUserMessageAt": null,
+            "status": "idle",
+            "activeTurn": null,
+            "capabilities": {
+              "supportsStreaming": true,
+              "supportsSessionPersistence": true,
+              "supportsDynamicModes": true,
+              "supportsMcpServers": false,
+              "supportsReasoningStream": true,
+              "supportsToolInvocations": true,
+              "supportsRewindConversation": false,
+              "supportsRewindFiles": false,
+              "supportsRewindBoth": false
+            },
+            "currentModeId": "full-access",
+            "availableModes": [
+              {
+                "id": "bypassPermissions",
+                "label": "Bypass",
+                "description": "No permissions"
+              },
+              {
+                "id": "default",
+                "label": "Default",
+                "description": "Ask for permissions"
+              },
+              {
+                "id": "full-access",
+                "label": "Full access",
+                "description": "No prompts"
+              },
+              {
+                "id": "auto",
+                "label": "Auto",
+                "description": "Ask/allow based on policy"
+              },
+              {
+                "id": "always-ask",
+                "label": "Always Ask",
+                "description": "Always prompt"
+              }
+            ],
+            "features": [
+              {
+                "type": "toggle",
+                "id": "test_feature",
+                "label": "Test feature",
+                "description": "Deterministic provider feature used by MCP integration tests.",
+                "value": false
+              }
+            ],
+            "pendingPermissions": [],
+            "persistence": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "metadata": {
+                "conversationId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "cwd": "/fixture/project"
+              }
+            },
+            "title": "Conversation fixture",
+            "labels": {},
+            "archivedAt": null,
+            "requiresAttention": false,
+            "attentionReason": null,
+            "attentionTimestamp": null
+          },
+          "error": null,
+          "creation": {
+            "kind": "agent",
+            "idempotencyKey": "conversation-create",
+            "revision": 2,
+            "phase": "completed",
+            "error": null,
+            "workspaceId": "wks_60c9c41574aed06e",
+            "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+            "agent": {
+              "id": "a5d676db-1f73-4124-ad3b-b30808873269",
+              "provider": "codex",
+              "cwd": "/fixture/project",
+              "workspaceId": "wks_60c9c41574aed06e",
+              "model": "gpt-5.4-mini",
+              "thinkingOptionId": null,
+              "effectiveThinkingOptionId": null,
+              "runtimeInfo": {
+                "provider": "codex",
+                "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "model": "gpt-5.4-mini",
+                "modeId": "full-access"
+              },
+              "createdAt": "2026-11-06T04:27:58.799Z",
+              "updatedAt": "2026-11-06T04:27:58.800Z",
+              "lastUserMessageAt": null,
+              "status": "idle",
+              "activeTurn": null,
+              "capabilities": {
+                "supportsStreaming": true,
+                "supportsSessionPersistence": true,
+                "supportsDynamicModes": true,
+                "supportsMcpServers": false,
+                "supportsReasoningStream": true,
+                "supportsToolInvocations": true,
+                "supportsRewindConversation": false,
+                "supportsRewindFiles": false,
+                "supportsRewindBoth": false
+              },
+              "currentModeId": "full-access",
+              "availableModes": [
+                {
+                  "id": "bypassPermissions",
+                  "label": "Bypass",
+                  "description": "No permissions"
+                },
+                {
+                  "id": "default",
+                  "label": "Default",
+                  "description": "Ask for permissions"
+                },
+                {
+                  "id": "full-access",
+                  "label": "Full access",
+                  "description": "No prompts"
+                },
+                {
+                  "id": "auto",
+                  "label": "Auto",
+                  "description": "Ask/allow based on policy"
+                },
+                {
+                  "id": "always-ask",
+                  "label": "Always Ask",
+                  "description": "Always prompt"
+                }
+              ],
+              "features": [
+                {
+                  "type": "toggle",
+                  "id": "test_feature",
+                  "label": "Test feature",
+                  "description": "Deterministic provider feature used by MCP integration tests.",
+                  "value": false
+                }
+              ],
+              "pendingPermissions": [],
+              "persistence": {
+                "provider": "codex",
+                "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "metadata": {
+                  "conversationId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                  "cwd": "/fixture/project"
+                }
+              },
+              "title": "Conversation fixture",
+              "labels": {},
+              "archivedAt": null,
+              "requiresAttention": false,
+              "attentionReason": null,
+              "attentionTimestamp": null
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "creation.subscribe.request",
+        "requestId": "chat-observe",
+        "kind": "agent",
+        "idempotencyKey": "conversation-create",
+        "subscribe": true
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "creation.subscribe.response",
+        "payload": {
+          "requestId": "chat-observe",
+          "subscriptionId": "2b02fc27-5b6e-4269-9923-7a620d63467f",
+          "snapshot": {
+            "kind": "agent",
+            "idempotencyKey": "conversation-create",
+            "revision": 2,
+            "phase": "completed",
+            "workspaceId": "wks_60c9c41574aed06e",
+            "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+            "agent": {
+              "id": "a5d676db-1f73-4124-ad3b-b30808873269",
+              "provider": "codex",
+              "cwd": "/fixture/project",
+              "workspaceId": "wks_60c9c41574aed06e",
+              "model": "gpt-5.4-mini",
+              "features": [
+                {
+                  "type": "toggle",
+                  "id": "test_feature",
+                  "label": "Test feature",
+                  "description": "Deterministic provider feature used by MCP integration tests.",
+                  "value": false
+                }
+              ],
+              "thinkingOptionId": null,
+              "effectiveThinkingOptionId": null,
+              "createdAt": "2026-11-06T04:27:58.799Z",
+              "updatedAt": "2026-11-06T04:27:58.800Z",
+              "lastUserMessageAt": null,
+              "status": "idle",
+              "activeTurn": null,
+              "capabilities": {
+                "supportsStreaming": true,
+                "supportsSessionPersistence": true,
+                "supportsDynamicModes": true,
+                "supportsMcpServers": false,
+                "supportsReasoningStream": true,
+                "supportsToolInvocations": true,
+                "supportsRewindConversation": false,
+                "supportsRewindFiles": false,
+                "supportsRewindBoth": false
+              },
+              "currentModeId": "full-access",
+              "availableModes": [
+                {
+                  "id": "bypassPermissions",
+                  "label": "Bypass",
+                  "description": "No permissions"
+                },
+                {
+                  "id": "default",
+                  "label": "Default",
+                  "description": "Ask for permissions"
+                },
+                {
+                  "id": "full-access",
+                  "label": "Full access",
+                  "description": "No prompts"
+                },
+                {
+                  "id": "auto",
+                  "label": "Auto",
+                  "description": "Ask/allow based on policy"
+                },
+                {
+                  "id": "always-ask",
+                  "label": "Always Ask",
+                  "description": "Always prompt"
+                }
+              ],
+              "pendingPermissions": [],
+              "persistence": {
+                "provider": "codex",
+                "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "metadata": {
+                  "conversationId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                  "cwd": "/fixture/project"
+                }
+              },
+              "runtimeInfo": {
+                "provider": "codex",
+                "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "model": "gpt-5.4-mini",
+                "modeId": "full-access"
+              },
+              "title": "Conversation fixture",
+              "labels": {},
+              "requiresAttention": false,
+              "attentionReason": null,
+              "attentionTimestamp": null,
+              "archivedAt": null
+            },
+            "error": null
+          },
+          "error": null
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "creation.subscribe.request",
+        "requestId": "chat-observe-missing",
+        "kind": "agent",
+        "idempotencyKey": "conversation-not-created",
+        "subscribe": false
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "creation.subscribe.response",
+        "payload": {
+          "requestId": "chat-observe-missing",
+          "snapshot": null,
+          "error": null
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.timeline.set_subscription.request",
+        "agentIds": ["a5d676db-1f73-4124-ad3b-b30808873269"],
+        "requestId": "chat-timeline"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.timeline.set_subscription.response",
+        "payload": {
+          "agentIds": ["a5d676db-1f73-4124-ad3b-b30808873269"],
+          "requestId": "chat-timeline",
+          "subscriptionId": "27c0f24d-0964-4f5e-8aa8-e85fa96ce64d"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "send_agent_message_request",
+        "requestId": "chat-send",
+        "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+        "text": "Respond with exactly: CHAT_CANCEL_READY",
+        "messageId": "chat-message"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "turn_started",
+            "provider": "codex",
+            "turnId": "fake-turn-0"
+          },
+          "timestamp": "2026-11-06T04:27:58.845Z"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "user_message",
+              "text": "Respond with exactly: CHAT_CANCEL_READY",
+              "messageId": "chat-message",
+              "clientMessageId": "chat-message"
+            },
+            "turnId": "fake-turn-0"
+          },
+          "timestamp": "2026-11-06T04:27:58.846Z",
+          "seq": 1,
+          "epoch": "ba906b0d-3c01-406e-9c50-e88a4417b668"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "thread_started",
+            "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+            "provider": "codex"
+          },
+          "timestamp": "2026-11-06T04:27:58.848Z"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "send_agent_message_response",
+        "payload": {
+          "requestId": "chat-send",
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "accepted": true,
+          "error": null
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "assistant_message",
+              "text": "CHAT_C"
+            },
+            "turnId": "fake-turn-0"
+          },
+          "timestamp": "2026-11-06T04:27:58.850Z",
+          "seq": 2,
+          "epoch": "ba906b0d-3c01-406e-9c50-e88a4417b668"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "cancel_agent_request",
+        "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+        "requestId": "chat-cancel"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "assistant_message",
+              "text": "ANCEL_READY"
+            },
+            "turnId": "fake-turn-0"
+          },
+          "timestamp": "2026-11-06T04:27:58.854Z",
+          "seq": 3,
+          "epoch": "ba906b0d-3c01-406e-9c50-e88a4417b668"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "turn_completed",
+            "provider": "codex",
+            "turnId": "fake-turn-0",
+            "usage": {
+              "inputTokens": 1,
+              "outputTokens": 1
+            }
+          },
+          "timestamp": "2026-11-06T04:27:58.854Z"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "cancel_agent_response",
+        "payload": {
+          "requestId": "chat-cancel",
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "agent": {
+            "id": "a5d676db-1f73-4124-ad3b-b30808873269",
+            "provider": "codex",
+            "cwd": "/fixture/project",
+            "workspaceId": "wks_60c9c41574aed06e",
+            "model": "gpt-5.4-mini",
+            "thinkingOptionId": null,
+            "effectiveThinkingOptionId": null,
+            "runtimeInfo": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "model": "gpt-5.4-mini",
+              "modeId": "full-access"
+            },
+            "createdAt": "2026-11-06T04:27:58.799Z",
+            "updatedAt": "2026-11-06T04:27:58.855Z",
+            "lastUserMessageAt": "2026-11-06T04:27:58.845Z",
+            "status": "idle",
+            "activeTurn": null,
+            "capabilities": {
+              "supportsStreaming": true,
+              "supportsSessionPersistence": true,
+              "supportsDynamicModes": true,
+              "supportsMcpServers": false,
+              "supportsReasoningStream": true,
+              "supportsToolInvocations": true,
+              "supportsRewindConversation": false,
+              "supportsRewindFiles": false,
+              "supportsRewindBoth": false
+            },
+            "currentModeId": "full-access",
+            "availableModes": [
+              {
+                "id": "bypassPermissions",
+                "label": "Bypass",
+                "description": "No permissions"
+              },
+              {
+                "id": "default",
+                "label": "Default",
+                "description": "Ask for permissions"
+              },
+              {
+                "id": "full-access",
+                "label": "Full access",
+                "description": "No prompts"
+              },
+              {
+                "id": "auto",
+                "label": "Auto",
+                "description": "Ask/allow based on policy"
+              },
+              {
+                "id": "always-ask",
+                "label": "Always Ask",
+                "description": "Always prompt"
+              }
+            ],
+            "features": [
+              {
+                "type": "toggle",
+                "id": "test_feature",
+                "label": "Test feature",
+                "description": "Deterministic provider feature used by MCP integration tests.",
+                "value": false
+              }
+            ],
+            "pendingPermissions": [],
+            "persistence": {
+              "provider": "codex",
+              "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+              "metadata": {
+                "conversationId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+                "cwd": "/fixture/project"
+              }
+            },
+            "title": "Conversation fixture",
+            "labels": {},
+            "archivedAt": null,
+            "lastUsage": {
+              "inputTokens": 1,
+              "outputTokens": 1
+            },
+            "requiresAttention": true,
+            "attentionReason": "finished",
+            "attentionTimestamp": "2026-11-06T04:27:58.854Z"
+          },
+          "error": null
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "send_agent_message_request",
+        "requestId": "chat-followup",
+        "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+        "text": "Respond with exactly: CHAT_FOLLOWUP",
+        "messageId": "chat-followup-message"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "turn_started",
+            "provider": "codex",
+            "turnId": "fake-turn-1"
+          },
+          "timestamp": "2026-11-06T04:27:58.864Z"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "user_message",
+              "text": "Respond with exactly: CHAT_FOLLOWUP",
+              "messageId": "chat-followup-message",
+              "clientMessageId": "chat-followup-message"
+            },
+            "turnId": "fake-turn-1"
+          },
+          "timestamp": "2026-11-06T04:27:58.864Z",
+          "seq": 4,
+          "epoch": "ba906b0d-3c01-406e-9c50-e88a4417b668"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "thread_started",
+            "sessionId": "1e8bd4e1-8dcb-41b1-9bde-5f524a1eab1f",
+            "provider": "codex"
+          },
+          "timestamp": "2026-11-06T04:27:58.865Z"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "send_agent_message_response",
+        "payload": {
+          "requestId": "chat-followup",
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "accepted": true,
+          "error": null
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "timeline",
+            "provider": "codex",
+            "item": {
+              "type": "assistant_message",
+              "text": "CHAT_FOLLOWUP"
+            },
+            "turnId": "fake-turn-1"
+          },
+          "timestamp": "2026-11-06T04:27:58.866Z",
+          "seq": 5,
+          "epoch": "ba906b0d-3c01-406e-9c50-e88a4417b668"
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent_stream",
+        "payload": {
+          "agentId": "a5d676db-1f73-4124-ad3b-b30808873269",
+          "event": {
+            "type": "turn_completed",
+            "provider": "codex",
+            "turnId": "fake-turn-1",
+            "usage": {
+              "inputTokens": 1,
+              "outputTokens": 1
+            }
+          },
+          "timestamp": "2026-11-06T04:27:58.866Z"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "send_agent_message_request",
+        "requestId": "chat-rejected",
+        "agentId": "missing-chat-agent",
+        "text": "Not delivered",
+        "messageId": "chat-rejected-message"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "send_agent_message_response",
+        "payload": {
+          "requestId": "chat-rejected",
+          "agentId": "missing-chat-agent",
+          "accepted": false,
+          "error": "Agent not found: missing-chat-agent"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "cancel_agent_request",
+        "agentId": "missing-chat-agent",
+        "requestId": "chat-cancel-missing"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "cancel_agent_response",
+        "payload": {
+          "requestId": "chat-cancel-missing",
+          "agentId": "missing-chat-agent",
+          "agent": null,
+          "error": "Agent missing-chat-agent not found"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.create.request",
+        "config": {
+          "provider": "codex",
+          "cwd": "/fixture/project",
+          "modeId": "default"
+        },
+        "workspaceId": "wks_60c9c41574aed06e",
+        "labels": {},
+        "requestId": "chat-workspace-create",
+        "subscribe": false
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "agent.create.response",
+        "payload": {
+          "requestId": "chat-workspace-create",
+          "agent": {
+            "id": "8bc90123-75c3-49b4-b980-0cf32a07f365",
+            "provider": "codex",
+            "cwd": "/fixture/project",
+            "workspaceId": "wks_60c9c41574aed06e",
+            "model": "gpt-5.4-mini",
+            "thinkingOptionId": null,
+            "effectiveThinkingOptionId": null,
+            "runtimeInfo": {
+              "provider": "codex",
+              "sessionId": "3d60331e-3f50-49f6-bcc5-43136204cda6",
+              "model": "gpt-5.4-mini",
+              "modeId": "default"
+            },
+            "createdAt": "2026-11-06T04:27:58.896Z",
+            "updatedAt": "2026-11-06T04:27:58.897Z",
+            "lastUserMessageAt": null,
+            "status": "idle",
+            "activeTurn": null,
+            "capabilities": {
+              "supportsStreaming": true,
+              "supportsSessionPersistence": true,
+              "supportsDynamicModes": true,
+              "supportsMcpServers": false,
+              "supportsReasoningStream": true,
+              "supportsToolInvocations": true,
+              "supportsRewindConversation": false,
+              "supportsRewindFiles": false,
+              "supportsRewindBoth": false
+            },
+            "currentModeId": "default",
+            "availableModes": [
+              {
+                "id": "bypassPermissions",
+                "label": "Bypass",
+                "description": "No permissions"
+              },
+              {
+                "id": "default",
+                "label": "Default",
+                "description": "Ask for permissions"
+              },
+              {
+                "id": "full-access",
+                "label": "Full access",
+                "description": "No prompts"
+              },
+              {
+                "id": "auto",
+                "label": "Auto",
+                "description": "Ask/allow based on policy"
+              },
+              {
+                "id": "always-ask",
+                "label": "Always Ask",
+                "description": "Always prompt"
+              }
+            ],
+            "features": [
+              {
+                "type": "toggle",
+                "id": "test_feature",
+                "label": "Test feature",
+                "description": "Deterministic provider feature used by MCP integration tests.",
+                "value": false
+              }
+            ],
+            "pendingPermissions": [],
+            "persistence": {
+              "provider": "codex",
+              "sessionId": "3d60331e-3f50-49f6-bcc5-43136204cda6",
+              "metadata": {
+                "conversationId": "3d60331e-3f50-49f6-bcc5-43136204cda6",
+                "cwd": "/fixture/project"
+              }
+            },
+            "title": null,
+            "labels": {},
+            "archivedAt": null,
+            "requiresAttention": false,
+            "attentionReason": null,
+            "attentionTimestamp": null
+          },
+          "error": null,
+          "creation": {
+            "kind": "agent",
+            "idempotencyKey": "chat-workspace-create",
+            "revision": 2,
+            "phase": "completed",
+            "error": null,
+            "workspaceId": "wks_60c9c41574aed06e",
+            "agentId": "8bc90123-75c3-49b4-b980-0cf32a07f365",
+            "agent": {
+              "id": "8bc90123-75c3-49b4-b980-0cf32a07f365",
+              "provider": "codex",
+              "cwd": "/fixture/project",
+              "workspaceId": "wks_60c9c41574aed06e",
+              "model": "gpt-5.4-mini",
+              "thinkingOptionId": null,
+              "effectiveThinkingOptionId": null,
+              "runtimeInfo": {
+                "provider": "codex",
+                "sessionId": "3d60331e-3f50-49f6-bcc5-43136204cda6",
+                "model": "gpt-5.4-mini",
+                "modeId": "default"
+              },
+              "createdAt": "2026-11-06T04:27:58.896Z",
+              "updatedAt": "2026-11-06T04:27:58.897Z",
+              "lastUserMessageAt": null,
+              "status": "idle",
+              "activeTurn": null,
+              "capabilities": {
+                "supportsStreaming": true,
+                "supportsSessionPersistence": true,
+                "supportsDynamicModes": true,
+                "supportsMcpServers": false,
+                "supportsReasoningStream": true,
+                "supportsToolInvocations": true,
+                "supportsRewindConversation": false,
+                "supportsRewindFiles": false,
+                "supportsRewindBoth": false
+              },
+              "currentModeId": "default",
+              "availableModes": [
+                {
+                  "id": "bypassPermissions",
+                  "label": "Bypass",
+                  "description": "No permissions"
+                },
+                {
+                  "id": "default",
+                  "label": "Default",
+                  "description": "Ask for permissions"
+                },
+                {
+                  "id": "full-access",
+                  "label": "Full access",
+                  "description": "No prompts"
+                },
+                {
+                  "id": "auto",
+                  "label": "Auto",
+                  "description": "Ask/allow based on policy"
+                },
+                {
+                  "id": "always-ask",
+                  "label": "Always Ask",
+                  "description": "Always prompt"
+                }
+              ],
+              "features": [
+                {
+                  "type": "toggle",
+                  "id": "test_feature",
+                  "label": "Test feature",
+                  "description": "Deterministic provider feature used by MCP integration tests.",
+                  "value": false
+                }
+              ],
+              "pendingPermissions": [],
+              "persistence": {
+                "provider": "codex",
+                "sessionId": "3d60331e-3f50-49f6-bcc5-43136204cda6",
+                "metadata": {
+                  "conversationId": "3d60331e-3f50-49f6-bcc5-43136204cda6",
+                  "cwd": "/fixture/project"
+                }
+              },
+              "title": null,
+              "labels": {},
+              "archivedAt": null,
+              "requiresAttention": false,
+              "attentionReason": null,
+              "attentionTimestamp": null
+            }
+          }
+        }
+      }
+    }
+  }
+]

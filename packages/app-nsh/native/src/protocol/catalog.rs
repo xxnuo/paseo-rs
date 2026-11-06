@@ -311,6 +311,10 @@ pub(crate) struct Agent {
     #[serde(deserialize_with = "nullable")]
     pub(crate) current_mode_id: Option<String>,
     pub(crate) status: AgentStatus,
+    // Full snapshots carry pending permissions, active turns and provider metadata needed on reopen.
+    // Retain these without logging or exposing raw values in the UI.
+    #[serde(flatten)]
+    pub(crate) extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize, Debug, PartialEq, Eq)]
