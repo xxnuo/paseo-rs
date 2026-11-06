@@ -186,13 +186,16 @@ fn connected_app(idle_close: bool, drops: Arc<AtomicUsize>) -> Headless {
 }
 
 #[test]
-fn an_idle_remote_close_clears_projects_and_restores_the_host_form() {
+fn an_idle_remote_close_clears_projects_and_automatic_retry_can_be_cancelled() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut app = connected_app(true, drops.clone());
-    app.run_for(Duration::from_secs(2)).unwrap();
-    app.wait_for("主机已断开连接，请重新连接（closed）")
+    app.run_for(Duration::from_secs(1)).unwrap();
+    app.wait_for("连接中断，将在 1 秒后自动重连；可取消重连")
         .unwrap();
     assert!(!app.screen().shows("LIVE_PUMP_PROJECT"));
+    app.press("role:button[取消重连]").unwrap();
+    app.wait_for("已断开连接").unwrap();
+    app.run_for(Duration::from_secs(3)).unwrap();
     assert!(app.screen().enabled("label:主机地址").unwrap());
     assert!(app.screen().enabled("role:button[连接主机]").unwrap());
     assert!(!app.screen().enabled("role:button[刷新项目]").unwrap());

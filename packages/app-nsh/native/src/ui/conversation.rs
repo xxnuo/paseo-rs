@@ -11,6 +11,7 @@ use crate::{
             CancelStatus, ConversationState, PendingMessage, PendingPermission, SendStatus,
         },
         timeline::{Action, FetchPlan, Row, Status, Timeline},
+        viewed::ViewedConversation,
     },
 };
 use nsh_base::{
@@ -165,8 +166,9 @@ struct Conversation {
     id: String,
     storage_key: String,
     storage_valid: bool,
-    timeline: RefCell<Timeline>,
-    transactions: RefCell<ConversationState>,
+    timeline: Rc<RefCell<Timeline>>,
+    transactions: Rc<RefCell<ConversationState>>,
+    attachment: Cell<u64>,
     attention: RefCell<Attention>,
     attention_busy: Cell<bool>,
     attention_queued: Cell<Option<Trigger>>,
@@ -340,7 +342,15 @@ impl Conversation {
                 .clear_agent_attention_after_page(self.id.clone());
         }
         self.active.set(false);
-        self.timeline.borrow_mut().detach();
+        if self
+            .timeline
+            .borrow_mut()
+            .detach_if_generation(self.attachment.get())
+        {
+            self.transactions
+                .borrow_mut()
+                .disconnected("处理结果尚未确认，请重新查询或重试");
+        }
         self.listeners.borrow_mut().clear();
         self.jobs.borrow_mut().clear();
         for token in self.tokens.take() {
@@ -350,6 +360,7 @@ impl Conversation {
 
     fn start(self: &Rc<Self>) {
         let action = self.timeline.borrow_mut().attach();
+        self.attachment.set(self.timeline.borrow().generation);
         self.actions(vec![action]);
     }
 
@@ -933,7 +944,12 @@ fn external_http_url(value: &str) -> bool {
     url::Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
-pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) -> Screen {
+pub(super) fn page(
+    client: Rc<Client>,
+    id: String,
+    memory: ViewedConversation,
+    back: impl Fn() + 'static,
+) -> Screen {
     let storage_key = format!(
         "paseo.nsh.composer:{}",
         serde_json::json!([client.server_info().server_id, id])
@@ -945,8 +961,11 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
         .transpose();
     let storage_valid = saved.is_ok();
     let saved = saved.ok().flatten().unwrap_or_default();
-    let mut transactions = ConversationState::default();
-    transactions.restore_pending(
+    memory
+        .transactions
+        .borrow_mut()
+        .disconnected("处理结果尚未确认，请重新查询或重试");
+    memory.transactions.borrow_mut().restore_pending(
         saved
             .pending
             .into_iter()
@@ -960,8 +979,9 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
         id: id.clone(),
         storage_key,
         storage_valid,
-        timeline: RefCell::new(Timeline::new(id.clone())),
-        transactions: RefCell::new(transactions),
+        timeline: memory.timeline,
+        transactions: memory.transactions,
+        attachment: Cell::new(0),
         attention: RefCell::new(Attention::default()),
         attention_busy: Cell::new(false),
         attention_queued: Cell::new(None),

@@ -225,6 +225,7 @@ pub(crate) struct Timeline {
     overflow_arrival: u64,
     completion_arrival: u64,
     live_head: Option<u64>,
+    attachment_arrival: u64,
 }
 
 impl Timeline {
@@ -249,6 +250,7 @@ impl Timeline {
             overflow_arrival: 0,
             completion_arrival: 0,
             live_head: None,
+            attachment_arrival: 0,
         }
     }
 
@@ -269,6 +271,8 @@ impl Timeline {
     }
 
     pub(crate) fn attach(&mut self) -> Action {
+        self.freeze_live();
+        self.attachment_arrival = self.next_arrival;
         self.generation += 1;
         self.status = Status::Bootstrapping;
         self.subscribed = false;
@@ -289,10 +293,32 @@ impl Timeline {
     }
 
     pub(crate) fn detach(&mut self) {
+        self.freeze_live();
         self.generation += 1;
         self.status = Status::Detached;
         self.subscribed = false;
         self.pending = None;
+    }
+
+    pub(crate) fn detach_if_generation(&mut self, generation: u64) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.detach();
+        true
+    }
+
+    fn freeze_live(&mut self) {
+        self.live_head = None;
+        for row in &mut self.rows {
+            row.active = false;
+        }
+        if let Some(base) = &mut self.overlay_base {
+            base.live_head = None;
+            for row in &mut base.rows {
+                row.active = false;
+            }
+        }
     }
 
     fn resume_plan(&self) -> FetchPlan {
@@ -914,6 +940,12 @@ impl Timeline {
             }
             // A same-epoch tail keeps previously loaded pages, including disjoint history.
             self.buffered.retain(|buffered| {
+                if (history.reset || epoch_changed || rewound)
+                    && buffered.arrival <= self.attachment_arrival
+                    && (buffered.event.epoch.is_none() || buffered.event.seq.is_none())
+                {
+                    return false;
+                }
                 buffered.arrival > pending.buffer_watermark
                     || buffered
                         .event
@@ -1698,6 +1730,71 @@ mod tests {
             | TimelineItem::User(text) => &text.text,
             _ => panic!("not text"),
         }
+    }
+
+    #[test]
+    fn reconnect_preserves_all_loaded_rows_and_rejects_the_old_page_cleanup() {
+        let mut timeline = current(seeded_history(), 128);
+        let ids: Vec<_> = timeline.rows.iter().map(|row| row.id).collect();
+        let old_generation = timeline.generation;
+        assert!(timeline.detach_if_generation(old_generation));
+        let after = start(&mut timeline);
+        assert!(matches!(
+            &after,
+            Action::Fetch {
+                plan: FetchPlan::After(Position { seq: 128, .. }),
+                ..
+            }
+        ));
+        assert!(!timeline.detach_if_generation(old_generation));
+        let mut response = page(&after, "epoch", None, None, vec![]);
+        response.window.max_seq = 128;
+        response.window.next_seq = 129;
+        assert!(apply(&mut timeline, &after, response).is_empty());
+        assert_eq!(timeline.status, Status::Current);
+        assert_eq!(
+            timeline.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(text(&timeline.rows[0]), "NSH_HISTORY_USER_000");
+        assert_eq!(text(&timeline.rows[127]), "NSH_HISTORY_REPLY_063");
+    }
+
+    #[test]
+    fn reconnect_freezes_the_previous_live_segment_and_new_epoch_drops_old_provisional() {
+        let mut timeline = current(vec![user(1)], 1);
+        timeline.stream(timeline.generation, anonymous("old answer", Some(2)));
+        timeline.detach();
+        let _ = start(&mut timeline);
+        assert!(timeline.rows.iter().all(|row| !row.active));
+        timeline.stream(timeline.generation, anonymous("new answer", Some(3)));
+        assert_eq!(timeline.rows.len(), 3);
+        assert_eq!(text(&timeline.rows[1]), "old answer");
+        assert_eq!(text(&timeline.rows[2]), "new answer");
+
+        let mut timeline = current(vec![user(1)], 1);
+        let mut provisional = anonymous("old uncommitted reply", None);
+        provisional.epoch = None;
+        timeline.stream(timeline.generation, provisional);
+        timeline.detach();
+        let after = start(&mut timeline);
+        let mut response = page(&after, "new-epoch", Some(1), Some(1), vec![user(1)]);
+        response.reset = true;
+        let tail = apply(&mut timeline, &after, response).remove(0);
+        let mut response = page(&tail, "new-epoch", Some(1), Some(1), vec![user(1)]);
+        response.reset = true;
+        let next = apply(&mut timeline, &tail, response);
+        assert!(
+            timeline
+                .rows
+                .iter()
+                .all(|row| text(row) != "old uncommitted reply")
+        );
+        assert!(timeline.rows.iter().all(|row| row.epoch == "new-epoch"));
+        assert!(
+            next.iter()
+                .all(|action| matches!(action, Action::Fetch { .. }))
+        );
     }
 
     #[test]
