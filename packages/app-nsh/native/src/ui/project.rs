@@ -12,6 +12,9 @@ use nsh_base::{button, nav_page, theme};
 use nsh_core::{element::Screen, prelude::*};
 use std::{cell::RefCell, future::Future, rc::Rc};
 
+#[path = "create_agent.rs"]
+mod create_agent;
+
 struct RequestTask {
     owner: Owner,
     task: RefCell<Option<Spawned<()>>>,
@@ -474,6 +477,7 @@ impl ProviderPanel {
 }
 
 fn provider_panel(client: Rc<Client>, workspace: Rc<Workspace>) -> impl IntoElement {
+    let workspace_id = workspace.id.clone();
     let state = Rc::new(ProviderPanel {
         task: RequestTask::new(),
         client,
@@ -502,7 +506,12 @@ fn provider_panel(client: Rc<Client>, workspace: Rc<Workspace>) -> impl IntoElem
             move || rows.get(),
             |provider: &Rc<Provider>| provider.provider.clone(),
             move |provider, _| {
-                provider_row(row_state.client.clone(), row_state.cwd.clone(), provider)
+                provider_row(
+                    row_state.client.clone(),
+                    row_state.cwd.clone(),
+                    workspace_id.clone(),
+                    provider,
+                )
             },
         ))
 }
@@ -522,6 +531,7 @@ fn provider_status(provider: &Provider) -> &'static str {
 fn provider_row(
     client: Rc<Client>,
     cwd: String,
+    workspace_id: String,
     provider: ReadSignal<Rc<Provider>>,
 ) -> impl IntoElement {
     let open = signal(Vec::<String>::new());
@@ -562,7 +572,13 @@ fn provider_row(
                 view()
                     .gap_2()
                     .child(text(provider_catalog(&provider)).text_color(move || theme().foreground))
-                    .child(feature_panel(client.clone(), cwd.clone(), provider))
+                    .child(feature_panel(client.clone(), cwd.clone(), provider.clone()))
+                    .child(create_agent::form(
+                        client.clone(),
+                        cwd.clone(),
+                        workspace_id.clone(),
+                        provider,
+                    ))
             },
         ))
 }
