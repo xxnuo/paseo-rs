@@ -90,8 +90,10 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
   confirmation, permission actions and structured questions in the Rust UI.
 - [ ] Complete timeline-specific todo/compaction/plugin presentation, turn
   footers, search/outline, attachments and full reconnect/cache restoration.
-- [ ] Agent/workspace attention and read-state synchronization, including
-  focus/blur and background visibility rules.
+- [x] Agent attention clearing on entry/input/successful send/blur, deferred
+  foreground attention, permission protection and lifecycle visibility rules.
+- [x] Explicit workspace read action with backend errors, retry and directory refresh.
+- [ ] Broader read-state navigation, mark-unread actions and notification ownership.
 - [ ] Onboarding, welcome, hosts and open/add-project flows.
 - [ ] Project list/settings, workspace creation/fork/import/archive and scripts.
 - [ ] Agent list, provider/profile/model selection and provider configuration.
@@ -138,13 +140,14 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 ## Current evidence
 
 Rust-first feasibility: `native` is an independent Cargo workspace using the
-local NSH checkout. At `07fcf8fdf`, all 123 Rust tests pass: 108 unit tests, two
-creation-recovery flows, four conversation bootstrap/layout flows, four socket/
-directory lifecycle flows and five host-form flows
-(`/tmp/paseo-nsh-chat-layout-regression-tests.log`). Creation recovery covers
+local NSH checkout. The latest attention/chat revision passes all 135 Rust tests:
+117 unit tests, two creation-recovery flows, three attention flows, four conversation
+bootstrap/layout flows, four socket/directory lifecycle flows and five host-form flows
+(`/tmp/paseo-nsh-attention-final-tests.log`). Creation recovery covers
 timeout/no-snapshot errors and owner cancellation combined with a workspace move.
 The same revision passes the Web/WASM library check
-(`/tmp/paseo-nsh-chat-final-wasm.log`); full browser chat acceptance remains open.
+(`/tmp/paseo-nsh-attention-final-wasm.log`). The full packaged browser chat
+workflow also passes, as detailed below.
 The connection implementation passed
 clippy with warnings denied before adding the terminal drawing probe; later DTOs
 still have unused-field warnings, so current warning-free clippy is not claimed. The Rust-root GTK input flow
@@ -272,6 +275,19 @@ after its UI run (`/tmp/paseo-nsh-chat-live-android.log`); screenshots are retai
 as `chat-{permission,complete}-android-ceaf8559-7c30-4049-9503-79e725f87cdb.png` in
 the same evidence directory. Its temporary adb reverse mapping was removed.
 
+The packaged Rust/WASM application passes the corresponding real Chrome chat
+workflow on a same-origin daemon: 128 history entries and paging, actual DOM mouse
+wheel scrolling, live reply chunks, tool allow/deny action IDs, permission-gate
+cancellation, another message in the same Agent, draft/history reopening, refresh,
+disconnect and reconnect with the same client UUID. The runner independently checks
+SDK/provider postconditions and rejects page errors. At 1000x800 and 390x600 it
+checks the actual list/composer viewport and editable draft, retaining eight
+screenshots in `packages/app-nsh/.nsh/evidence/rust-web-6a08f5bd-8590-47f2-b1f7-d920345c0b0d`.
+Evidence: `/tmp/paseo-nsh-web-chat-live-final.log`. Cross-origin upgrades still
+receive HTTP 403; no Origin policy was relaxed. The 11.2 MB prototype package is
+not a full-app performance comparison. The final queued-attention trigger fix
+was verified by Rust tests/WASM check after this packaged browser run.
+
 Bootstrap tests verify that a text chunk arriving before a Running snapshot does
 not disable Stop, and that late history cannot reopen a closed page. Compact
 390x480/390x600 root tests actually scroll, type and stop with permissions present.
@@ -284,7 +300,19 @@ restored in-flight attempts become outcome-unknown and retain their message IDs.
 Canonical user coverage removes their local duplicate, whereas provisional echoes
 only affect presentation. Host reconnection currently returns to the host screen;
 automatic conversation restoration and durable timeline caching remain open.
-Known parity gaps include attention/read-state clearing on focus/blur and dedicated
+Agent attention now follows the upstream focus/input/send/blur rules, with a
+separate local revision protecting against stale history/clear responses. Newly
+arriving foreground attention stays deferred until interaction; permission
+attention cannot be cleared by these triggers. A queued interaction is rechecked
+after an in-flight clear, including a newly arriving permission reason. Cleanup
+uses cached Rust state and a connection-owned bounded RPC, without reading disposed
+page signals. Workspace read actions are explicit and limited to attention/failed
+workspaces. Three Root integration tests pass for queued input, permission races,
+late page-disposal responses and workspace backend-error/retry/refresh behavior
+(`/tmp/paseo-nsh-attention-integration-tests.log`). Five source-schema checks pass,
+including actual Rust attention request serialization with no skipped tests.
+
+Known parity gaps include broader mark-unread/notification navigation and dedicated
 todo/compaction/plugin views. A fake provider may end a turn without a terminal
 tool update: the original App also keeps that raw tool status, so the Rust view
 must not fabricate a completed/cancelled tool result. Clear turn footers and
