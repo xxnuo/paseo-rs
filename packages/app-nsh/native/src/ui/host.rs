@@ -5,14 +5,18 @@ use crate::{
 };
 use nsh_base::{button, input, nav_page, nav_stack, theme};
 use nsh_core::{prelude::*, storage::Storage};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 const CLIENT_ID_KEY: &str = "paseo.nsh.client-id";
 
 struct Connection {
     owner: Owner,
-    client: RefCell<Option<Client>>,
+    client: RefCell<Option<Rc<Client>>>,
     task: RefCell<Option<Spawned<()>>>,
+    generation: Cell<u64>,
     busy: Signal<bool>,
     connected: Signal<bool>,
     status: Signal<String>,
@@ -26,6 +30,7 @@ impl Connection {
             owner: Owner::current(),
             client: RefCell::new(None),
             task: RefCell::new(None),
+            generation: Cell::new(0),
             busy: signal(false),
             connected: signal(false),
             status: signal(String::new()),
@@ -34,6 +39,9 @@ impl Connection {
         });
         let cleanup_state = state.clone();
         cleanup(move || {
+            cleanup_state
+                .generation
+                .set(cleanup_state.generation.get().wrapping_add(1));
             if let Some(task) = cleanup_state.task.take() {
                 task.cancel();
             }
@@ -54,30 +62,38 @@ impl Connection {
             }
         };
         self.busy.set(true);
+        let generation = self.next_generation();
         self.projects.set(String::new());
         self.status.set("正在连接主机…".to_owned());
         let state = self.clone();
+        let weak = Rc::downgrade(self);
         let task = self.owner.run(|| {
             spawn(async move {
                 let label = host.label.clone();
-                let mut client = match Client::connect(host, &client_id).await {
+                let client = match Client::connect(host, &client_id, move |error| {
+                    if let Some(state) = weak.upgrade() {
+                        state.failed(generation, error);
+                    }
+                })
+                .await
+                {
                     Ok(client) => client,
                     Err(error) => {
-                        state.failed(error);
+                        state.failed(generation, error);
                         return;
                     }
                 };
+                if !state.current(generation) {
+                    return;
+                }
                 state
                     .hostname
                     .set(client.server_info().hostname.clone().unwrap_or(label));
                 state.status.set("已连接，正在读取项目…".to_owned());
-                match client.projects(&uuid::Uuid::new_v4().to_string()).await {
-                    Ok(projects) => {
-                        state.client.replace(Some(client));
-                        state.loaded(projects);
-                    }
-                    Err(error) => state.failed(error),
-                }
+                let client = Rc::new(client);
+                state.client.replace(Some(client.clone()));
+                state.connected.set(true);
+                state.projects_finished(generation, client.projects().await);
             })
         });
         self.task.replace(Some(task));
@@ -87,24 +103,52 @@ impl Connection {
         if self.busy.get_untracked() {
             return;
         }
-        let Some(mut client) = self.client.take() else {
+        let client = self.client.borrow().clone();
+        let Some(client) = client else {
             return;
         };
+        let generation = self.generation.get();
         self.busy.set(true);
         self.status.set("正在读取项目…".to_owned());
         let state = self.clone();
         let task = self.owner.run(|| {
             spawn(async move {
-                match client.projects(&uuid::Uuid::new_v4().to_string()).await {
-                    Ok(projects) => {
-                        state.client.replace(Some(client));
-                        state.loaded(projects);
-                    }
-                    Err(error) => state.failed(error),
-                }
+                state.projects_finished(generation, client.projects().await);
             })
         });
         self.task.replace(Some(task));
+    }
+
+    fn next_generation(&self) -> u64 {
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+        generation
+    }
+
+    fn current(&self, generation: u64) -> bool {
+        self.owner.is_live() && self.generation.get() == generation
+    }
+
+    fn projects_finished(&self, generation: u64, result: Result<ProjectList, ClientError>) {
+        if !self.current(generation) {
+            return;
+        }
+        match result {
+            Ok(projects) => self.loaded(projects),
+            Err(error) => {
+                let connected = self
+                    .client
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|client| client.is_connected());
+                if connected {
+                    self.busy.set(false);
+                    self.status.set(format!("{error}（{}）", error.code()));
+                } else {
+                    self.failed(generation, error);
+                }
+            }
+        }
     }
 
     fn loaded(&self, projects: ProjectList) {
@@ -124,7 +168,14 @@ impl Connection {
             .set(format!("已连接：{}", self.hostname.get_untracked()));
     }
 
-    fn failed(&self, error: ClientError) {
+    fn failed(&self, generation: u64, error: ClientError) {
+        if !self.current(generation) {
+            return;
+        }
+        self.next_generation();
+        if let Some(task) = self.task.take() {
+            task.cancel();
+        }
         self.client.take();
         self.connected.set(false);
         self.busy.set(false);
@@ -133,6 +184,7 @@ impl Connection {
     }
 
     fn disconnect(&self) {
+        self.next_generation();
         if let Some(task) = self.task.take() {
             task.cancel();
         }
@@ -250,4 +302,27 @@ pub(crate) fn screen() -> impl IntoElement {
                 .child(text(move || projects.get()).text_color(move || theme().foreground)),
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::element::{Runtime, create_root};
+
+    #[test]
+    fn an_old_connection_callback_cannot_clear_a_new_connection() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let (owner, state) = create_root(Connection::new);
+        let old = state.next_generation();
+        state.next_generation();
+        state.connected.set(true);
+        state.status.set("已连接：new-host".to_owned());
+        state.projects.set("NEW_PROJECT".to_owned());
+        state.failed(old, ClientError::Closed);
+        assert!(state.connected.get_untracked());
+        assert_eq!(state.status.get_untracked(), "已连接：new-host");
+        assert_eq!(state.projects.get_untracked(), "NEW_PROJECT");
+        owner.dispose();
+    }
 }

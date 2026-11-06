@@ -1,12 +1,21 @@
-//! Direct, sequential RPC client; call it inside `nsh_core::element::spawn`.
+//! Direct RPC client with one root-owned WebSocket reader.
 
 use crate::host::ParsedHost;
 use crate::protocol::{self, HelloRejection, ProjectList, ServerEvent, ServerInfo};
 use nsh_core::{
-    element::timer,
+    element::{Spawned, spawn, timer},
     websocket::{WebSocket, WebSocketData},
 };
-use std::{fmt, future::Future, pin::pin, task::Poll, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    fmt,
+    future::Future,
+    pin::pin,
+    rc::Rc,
+    task::{Poll, Waker},
+    time::Duration,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -60,12 +69,19 @@ impl From<HelloRejection> for ClientError {
 
 // No Debug: the socket and future protocol fields can carry credentials.
 pub(crate) struct Client {
-    socket: Option<WebSocket>,
+    socket: Rc<WebSocket>,
+    pending: Rc<PendingProjects>,
+    reader: Option<Spawned<()>>,
+    on_state: Rc<dyn Fn(ClientError)>,
     server_info: ServerInfo,
 }
 
 impl Client {
-    pub(crate) async fn connect(host: ParsedHost, client_id: &str) -> Result<Self, ClientError> {
+    pub(crate) async fn connect(
+        host: ParsedHost,
+        client_id: &str,
+        on_state: impl Fn(ClientError) + 'static,
+    ) -> Result<Self, ClientError> {
         with_timeout(async {
             let hello = protocol::hello(client_id, host.password.as_deref())
                 .map_err(|_| ClientError::InvalidProtocol)?;
@@ -78,8 +94,29 @@ impl Client {
                 .map_err(|_| ClientError::Transport)?;
             loop {
                 if let Some(server_info) = handshake_event(read_event(&socket).await?)? {
+                    let socket = Rc::new(socket);
+                    let pending = Rc::new(PendingProjects::default());
+                    let on_state: Rc<dyn Fn(ClientError)> = Rc::new(on_state);
+                    let read_socket = socket.clone();
+                    let read_pending = pending.clone();
+                    let read_state = on_state.clone();
+                    let reader = spawn(async move {
+                        loop {
+                            let result = match read_event(&read_socket).await {
+                                Ok(event) => read_pending.dispatch(event),
+                                Err(error) => Err(error),
+                            };
+                            if let Err(error) = result {
+                                fail_connection(&read_pending, &read_state, error);
+                                return;
+                            }
+                        }
+                    });
                     return Ok(Self {
-                        socket: Some(socket),
+                        socket,
+                        pending,
+                        reader: Some(reader),
+                        on_state,
                         server_info,
                     });
                 }
@@ -92,25 +129,147 @@ impl Client {
         &self.server_info
     }
 
-    pub(crate) async fn projects(&mut self, request_id: &str) -> Result<ProjectList, ClientError> {
+    pub(crate) fn is_connected(&self) -> bool {
+        self.pending.failure.get().is_none()
+    }
+
+    pub(crate) async fn projects(&self) -> Result<ProjectList, ClientError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (guard, reply) = self.pending.register(request_id.clone())?;
         let result = with_timeout(async {
-            let socket = self.socket.as_ref().ok_or(ClientError::Closed)?;
-            socket
-                .write(WebSocketData::Text(protocol::list_projects(request_id)))
+            if self
+                .socket
+                .write(WebSocketData::Text(protocol::list_projects(&request_id)))
                 .await
-                .map_err(|_| ClientError::Transport)?;
-            loop {
-                if let Some(projects) = projects_event(read_event(socket).await?, request_id)? {
-                    return Ok(projects);
-                }
+                .is_err()
+            {
+                fail_connection(&self.pending, &self.on_state, ClientError::Transport);
+                return Err(ClientError::Transport);
             }
+            reply.await
         })
         .await;
-        // A timed-out read/RPC leaves uncertain transport state; dropping cancels its I/O.
-        if result.is_err() {
-            self.socket.take();
-        }
+        drop(guard);
         result
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.pending.close(ClientError::Closed);
+        if let Some(reader) = self.reader.take() {
+            reader.cancel();
+        }
+    }
+}
+
+#[derive(Default)]
+struct PendingProjects {
+    slots: RefCell<HashMap<String, Rc<RefCell<ProjectReply>>>>,
+    failure: Cell<Option<ClientError>>,
+}
+
+#[derive(Default)]
+struct ProjectReply {
+    result: Option<Result<ProjectList, ClientError>>,
+    waker: Option<Waker>,
+}
+
+struct PendingGuard {
+    pending: Rc<PendingProjects>,
+    request_id: String,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pending.slots.borrow_mut().remove(&self.request_id);
+    }
+}
+
+struct ProjectResponse(Rc<RefCell<ProjectReply>>);
+
+impl Future for ProjectResponse {
+    type Output = Result<ProjectList, ClientError>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let mut reply = self.0.borrow_mut();
+        match reply.result.take() {
+            Some(result) => Poll::Ready(result),
+            None => {
+                reply.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl PendingProjects {
+    fn register(
+        self: &Rc<Self>,
+        request_id: String,
+    ) -> Result<(PendingGuard, ProjectResponse), ClientError> {
+        if let Some(error) = self.failure.get() {
+            return Err(error);
+        }
+        let slot = Rc::new(RefCell::new(ProjectReply::default()));
+        self.slots
+            .borrow_mut()
+            .insert(request_id.clone(), slot.clone());
+        Ok((
+            PendingGuard {
+                pending: self.clone(),
+                request_id,
+            },
+            ProjectResponse(slot),
+        ))
+    }
+
+    fn dispatch(&self, event: ServerEvent) -> Result<(), ClientError> {
+        match event {
+            ServerEvent::Projects(projects) => {
+                let slot = self.slots.borrow_mut().remove(&projects.request_id);
+                if let Some(slot) = slot {
+                    deliver(&slot, Ok(projects));
+                }
+            }
+            ServerEvent::HelloRejected(reason) => return Err(reason.into()),
+            // No event subscriptions are advertised yet. Unknown frames never resolve RPC slots.
+            ServerEvent::Unknown(_) | ServerEvent::Pong | ServerEvent::ServerInfo(_) => {}
+        }
+        Ok(())
+    }
+
+    fn close(&self, error: ClientError) -> bool {
+        if self.failure.get().is_some() {
+            return false;
+        }
+        self.failure.set(Some(error));
+        let slots = std::mem::take(&mut *self.slots.borrow_mut());
+        for slot in slots.into_values() {
+            deliver(&slot, Err(error));
+        }
+        true
+    }
+}
+
+fn deliver(slot: &RefCell<ProjectReply>, result: Result<ProjectList, ClientError>) {
+    let waker = {
+        let mut reply = slot.borrow_mut();
+        reply.result = Some(result);
+        reply.waker.take()
+    };
+    if let Some(waker) = waker {
+        waker.wake();
+    }
+}
+
+fn fail_connection(
+    pending: &PendingProjects,
+    on_state: &Rc<dyn Fn(ClientError)>,
+    error: ClientError,
+) {
+    if pending.close(error) {
+        on_state(error);
     }
 }
 
@@ -129,17 +288,6 @@ fn handshake_event(event: ServerEvent) -> Result<Option<ServerInfo>, ClientError
     match event {
         ServerEvent::ServerInfo(info) if info.protocol_version == Some(1) => Ok(Some(info)),
         ServerEvent::ServerInfo(_) => Err(ClientError::InvalidProtocol),
-        ServerEvent::HelloRejected(reason) => Err(reason.into()),
-        _ => Ok(None),
-    }
-}
-
-fn projects_event(
-    event: ServerEvent,
-    request_id: &str,
-) -> Result<Option<ProjectList>, ClientError> {
-    match event {
-        ServerEvent::Projects(projects) if projects.request_id == request_id => Ok(Some(projects)),
         ServerEvent::HelloRejected(reason) => Err(reason.into()),
         _ => Ok(None),
     }
@@ -223,20 +371,100 @@ mod tests {
 
     #[test]
     fn projects_accepts_only_the_requested_response_identity() {
+        let pending = Rc::new(PendingProjects::default());
+        let (_guard, response) = pending.register("projects-populated".to_owned()).unwrap();
+        let mut response = pin!(response);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut unrelated = fixtures()[5]["frame"].clone();
+        unrelated["message"]["payload"]["requestId"] = json!("another-request");
+        pending.dispatch(event(&unrelated)).unwrap();
+        pending.dispatch(event(&json!({"type":"session","message":{"type":"future.update","payload":{"requestId":"projects-populated"}}}))).unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
         let frame = &fixtures()[5]["frame"];
-        assert!(
-            projects_event(event(frame), "another-request")
-                .unwrap()
-                .is_none()
-        );
-        let projects = projects_event(event(frame), "projects-populated")
-            .unwrap()
-            .unwrap();
+        pending.dispatch(event(frame)).unwrap();
+        let Poll::Ready(Ok(projects)) = response.as_mut().poll(&mut cx) else {
+            panic!("matching response not delivered")
+        };
         assert_eq!(projects.projects[0].project_id, "fixture-project");
-        assert!(
-            projects_event(event(&json!({"type":"future.event"})), "projects-populated")
-                .unwrap()
-                .is_none()
+        assert!(pending.slots.borrow().is_empty());
+    }
+
+    #[test]
+    fn cancelling_or_timing_out_a_request_removes_its_slot_and_ignores_late_responses() {
+        let pending = Rc::new(PendingProjects::default());
+        let (guard, response) = pending.register("cancelled".to_owned()).unwrap();
+        let mut cancelled = Box::pin(async move {
+            let _guard = guard;
+            response.await
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+        drop(cancelled);
+        assert!(pending.slots.borrow().is_empty());
+
+        let (guard, response) = pending.register("expired".to_owned()).unwrap();
+        let expired = Cell::new(false);
+        let deadline = std::future::poll_fn(|_| {
+            if expired.get() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        });
+        let mut request = Box::pin(race_deadline(
+            async move {
+                let _guard = guard;
+                response.await
+            },
+            deadline,
+        ));
+        assert!(request.as_mut().poll(&mut cx).is_pending());
+        expired.set(true);
+        assert!(matches!(
+            request.as_mut().poll(&mut cx),
+            Poll::Ready(Err(ClientError::Timeout))
+        ));
+        assert!(pending.slots.borrow().is_empty());
+        assert_eq!(pending.failure.get(), None);
+
+        let (_guard, response) = pending.register("projects-populated".to_owned()).unwrap();
+        let mut response = pin!(response);
+        let mut late = fixtures()[5]["frame"].clone();
+        late["message"]["payload"]["requestId"] = json!("expired");
+        pending.dispatch(event(&late)).unwrap();
+        assert!(response.as_mut().poll(&mut cx).is_pending());
+        pending.dispatch(event(&fixtures()[5]["frame"])).unwrap();
+        assert!(matches!(
+            response.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(_))
+        ));
+    }
+
+    #[test]
+    fn terminal_failure_notifies_once_and_finishes_all_pending_requests() {
+        let pending = Rc::new(PendingProjects::default());
+        let (_first, first) = pending.register("first".to_owned()).unwrap();
+        let (_second, second) = pending.register("second".to_owned()).unwrap();
+        let notices = Rc::new(Cell::new(0));
+        let callback_notices = notices.clone();
+        let callback: Rc<dyn Fn(ClientError)> =
+            Rc::new(move |_| callback_notices.set(callback_notices.get() + 1));
+        fail_connection(&pending, &callback, ClientError::Closed);
+        fail_connection(&pending, &callback, ClientError::Transport);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            pin!(first).as_mut().poll(&mut cx),
+            Poll::Ready(Err(ClientError::Closed))
+        ));
+        assert!(matches!(
+            pin!(second).as_mut().poll(&mut cx),
+            Poll::Ready(Err(ClientError::Closed))
+        ));
+        assert_eq!(notices.get(), 1);
+        assert!(pending.slots.borrow().is_empty());
+        assert_eq!(
+            pending.register("after-close".to_owned()).err(),
+            Some(ClientError::Closed)
         );
     }
 
