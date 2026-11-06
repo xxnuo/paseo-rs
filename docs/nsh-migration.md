@@ -38,7 +38,7 @@ implementation or acceptance runs should start until the user resumes it.
   build/test directories are disposable. The dedicated `PaseoNshQA` emulator
   was stopped, and its temporary adb reverse list was empty.
 - All task topic branches are preserved remotely in `xxnuo/paseo-rs` and the
-  `xxnuo/nsh` fork (NSH remote `backup`; `origin` remains the upstream).
+  `xxnuo/nsh` fork (NSH remote `origin`; `upstream` is `longbridge/nsh`).
   This backup does not merge WIP into main or imply release readiness.
 
 Still outstanding: full theme/layout and remaining pages, project/workspace
