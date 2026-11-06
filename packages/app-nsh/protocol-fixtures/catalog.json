@@ -1,0 +1,820 @@
+[
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "project.list.request",
+        "requestId": "catalog-projects"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "project.list.response",
+        "payload": {
+          "requestId": "catalog-projects",
+          "projects": [
+            {
+              "projectId": "fixture-project",
+              "projectKey": "fixture-project-catalog-key",
+              "projectDisplayName": "project",
+              "projectCustomName": null,
+              "projectCustomIconRevision": null,
+              "projectIconRevision": "automatic:none:v1",
+              "projectRootPath": "/fixture/project",
+              "projectKind": "non_git"
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "get_providers_snapshot_request",
+        "cwd": "/fixture/project",
+        "requestId": "catalog-providers"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "get_providers_snapshot_response",
+        "payload": {
+          "cwd": "/fixture/project",
+          "generatedAt": "2026-11-06T00:00:00.000Z",
+          "entries": [
+            {
+              "provider": "claude",
+              "status": "ready",
+              "enabled": true,
+              "source": "builtin",
+              "label": "Claude",
+              "description": "Anthropic's multi-tool assistant with MCP support, streaming, and deep reasoning",
+              "defaultModeId": "auto",
+              "models": [
+                {
+                  "provider": "claude",
+                  "id": "haiku",
+                  "label": "Haiku",
+                  "isDefault": true
+                },
+                {
+                  "provider": "claude",
+                  "id": "sonnet",
+                  "label": "Sonnet",
+                  "isDefault": false
+                }
+              ],
+              "modes": [
+                {
+                  "id": "bypassPermissions",
+                  "label": "Bypass",
+                  "description": "No permissions"
+                },
+                {
+                  "id": "default",
+                  "label": "Default",
+                  "description": "Ask for permissions"
+                },
+                {
+                  "id": "full-access",
+                  "label": "Full access",
+                  "description": "No prompts"
+                },
+                {
+                  "id": "auto",
+                  "label": "Auto",
+                  "description": "Ask/allow based on policy"
+                },
+                {
+                  "id": "always-ask",
+                  "label": "Always Ask",
+                  "description": "Always prompt"
+                }
+              ],
+              "fetchedAt": "2026-11-06T00:00:00.000Z"
+            },
+            {
+              "provider": "codex",
+              "status": "ready",
+              "enabled": true,
+              "source": "builtin",
+              "label": "Codex",
+              "description": "OpenAI's Codex workspace agent with sandbox controls and optional network access",
+              "defaultModeId": "auto-review",
+              "models": [
+                {
+                  "provider": "codex",
+                  "id": "gpt-5.4-mini",
+                  "label": "gpt-5.4-mini",
+                  "isDefault": true
+                }
+              ],
+              "modes": [
+                {
+                  "id": "bypassPermissions",
+                  "label": "Bypass",
+                  "description": "No permissions"
+                },
+                {
+                  "id": "default",
+                  "label": "Default",
+                  "description": "Ask for permissions"
+                },
+                {
+                  "id": "full-access",
+                  "label": "Full access",
+                  "description": "No prompts"
+                },
+                {
+                  "id": "auto",
+                  "label": "Auto",
+                  "description": "Ask/allow based on policy"
+                },
+                {
+                  "id": "always-ask",
+                  "label": "Always Ask",
+                  "description": "Always prompt"
+                }
+              ],
+              "fetchedAt": "2026-11-06T00:00:00.000Z"
+            },
+            {
+              "provider": "copilot",
+              "status": "unavailable",
+              "enabled": false,
+              "source": "builtin",
+              "label": "Copilot",
+              "description": "GitHub Copilot via Agent Client Protocol with dynamic modes and session support",
+              "defaultModeId": "https://agentclientprotocol.com/protocol/session-modes#agent"
+            },
+            {
+              "provider": "opencode",
+              "status": "ready",
+              "enabled": true,
+              "source": "builtin",
+              "label": "OpenCode",
+              "description": "Open-source coding assistant with multi-provider model support",
+              "defaultModeId": null,
+              "models": [
+                {
+                  "provider": "opencode",
+                  "id": "test-model",
+                  "label": "Test Model",
+                  "isDefault": true
+                }
+              ],
+              "modes": [
+                {
+                  "id": "bypassPermissions",
+                  "label": "Bypass",
+                  "description": "No permissions"
+                },
+                {
+                  "id": "default",
+                  "label": "Default",
+                  "description": "Ask for permissions"
+                },
+                {
+                  "id": "full-access",
+                  "label": "Full access",
+                  "description": "No prompts"
+                },
+                {
+                  "id": "auto",
+                  "label": "Auto",
+                  "description": "Ask/allow based on policy"
+                },
+                {
+                  "id": "always-ask",
+                  "label": "Always Ask",
+                  "description": "Always prompt"
+                }
+              ],
+              "fetchedAt": "2026-11-06T00:00:00.000Z"
+            },
+            {
+              "provider": "pi",
+              "status": "unavailable",
+              "enabled": false,
+              "source": "builtin",
+              "label": "Pi",
+              "description": "Minimal terminal-based coding agent with multi-provider LLM support",
+              "defaultModeId": null
+            },
+            {
+              "provider": "omp",
+              "status": "unavailable",
+              "enabled": false,
+              "source": "builtin",
+              "label": "Oh My Pi",
+              "description": "Multi-provider coding agent with native approvals, host tools, and subagents",
+              "defaultModeId": "full"
+            }
+          ],
+          "requestId": "catalog-providers"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "list_provider_features_request",
+        "draftConfig": {
+          "provider": "codex",
+          "cwd": "/fixture/project"
+        },
+        "requestId": "catalog-features"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "list_provider_features_response",
+        "payload": {
+          "provider": "codex",
+          "features": [],
+          "error": null,
+          "fetchedAt": "2026-11-06T00:00:00.000Z",
+          "requestId": "catalog-features"
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_workspaces_request",
+        "requestId": "catalog-workspaces",
+        "filter": {
+          "projectId": "fixture-project"
+        },
+        "page": {
+          "limit": 50
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_workspaces_response",
+        "payload": {
+          "requestId": "catalog-workspaces",
+          "entries": [
+            {
+              "id": "fixture-workspace-1",
+              "projectId": "fixture-project",
+              "projectDisplayName": "project",
+              "projectCustomName": null,
+              "projectCustomIconRevision": null,
+              "projectRootPath": "/fixture/project",
+              "workspaceDirectory": "/fixture/project",
+              "setupStatus": null,
+              "projectKind": "non_git",
+              "workspaceKind": "directory",
+              "name": "project",
+              "title": null,
+              "pinnedAt": null,
+              "background": false,
+              "archivingAt": null,
+              "status": "done",
+              "statusEnteredAt": "2026-11-06T00:00:00.000Z",
+              "activityAt": null,
+              "createdAt": "2026-11-06T00:00:00.000Z",
+              "diffStat": null,
+              "scripts": [],
+              "project": {
+                "projectKey": "fixture-project",
+                "projectName": "project",
+                "workspaceName": "project",
+                "checkout": {
+                  "cwd": "/fixture/project",
+                  "isGit": false,
+                  "currentBranch": null,
+                  "remoteUrl": null,
+                  "worktreeRoot": null,
+                  "isPaseoOwnedWorktree": false,
+                  "mainRepoRoot": null
+                }
+              },
+              "lastUserMessageAt": null
+            },
+            {
+              "id": "fixture-workspace-2",
+              "projectId": "fixture-project",
+              "projectDisplayName": "project",
+              "projectCustomName": null,
+              "projectCustomIconRevision": null,
+              "projectRootPath": "/fixture/project",
+              "workspaceDirectory": "/fixture/project",
+              "setupStatus": null,
+              "projectKind": "non_git",
+              "workspaceKind": "directory",
+              "name": "project",
+              "title": null,
+              "pinnedAt": null,
+              "background": false,
+              "archivingAt": null,
+              "status": "done",
+              "statusEnteredAt": "2026-11-06T00:00:00.000Z",
+              "activityAt": null,
+              "createdAt": "2026-11-06T00:00:00.000Z",
+              "diffStat": null,
+              "scripts": [],
+              "project": {
+                "projectKey": "fixture-project",
+                "projectName": "project",
+                "workspaceName": "project",
+                "checkout": {
+                  "cwd": "/fixture/project",
+                  "isGit": false,
+                  "currentBranch": null,
+                  "remoteUrl": null,
+                  "worktreeRoot": null,
+                  "isPaseoOwnedWorktree": false,
+                  "mainRepoRoot": null
+                }
+              },
+              "lastUserMessageAt": null
+            }
+          ],
+          "emptyProjects": [],
+          "pageInfo": {
+            "nextCursor": null,
+            "prevCursor": null,
+            "hasMore": false
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agents_request",
+        "requestId": "catalog-agents",
+        "filter": {
+          "projectKeys": ["fixture-project"]
+        },
+        "page": {
+          "limit": 50
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agents_response",
+        "payload": {
+          "requestId": "catalog-agents",
+          "entries": [
+            {
+              "agent": {
+                "id": "fixture-agent-b",
+                "provider": "claude",
+                "cwd": "/fixture/project",
+                "workspaceId": "fixture-workspace-2",
+                "model": "haiku",
+                "thinkingOptionId": null,
+                "effectiveThinkingOptionId": null,
+                "runtimeInfo": {
+                  "provider": "claude",
+                  "sessionId": "fixture-session-1",
+                  "model": "haiku",
+                  "modeId": "default"
+                },
+                "createdAt": "2026-11-06T00:00:00.000Z",
+                "updatedAt": "2026-11-06T00:00:00.000Z",
+                "lastUserMessageAt": null,
+                "status": "idle",
+                "activeTurn": null,
+                "capabilities": {
+                  "supportsStreaming": true,
+                  "supportsSessionPersistence": true,
+                  "supportsDynamicModes": true,
+                  "supportsMcpServers": false,
+                  "supportsReasoningStream": true,
+                  "supportsToolInvocations": true,
+                  "supportsRewindConversation": false,
+                  "supportsRewindFiles": false,
+                  "supportsRewindBoth": false
+                },
+                "currentModeId": "default",
+                "availableModes": [
+                  {
+                    "id": "bypassPermissions",
+                    "label": "Bypass",
+                    "description": "No permissions"
+                  },
+                  {
+                    "id": "default",
+                    "label": "Default",
+                    "description": "Ask for permissions"
+                  },
+                  {
+                    "id": "full-access",
+                    "label": "Full access",
+                    "description": "No prompts"
+                  },
+                  {
+                    "id": "auto",
+                    "label": "Auto",
+                    "description": "Ask/allow based on policy"
+                  },
+                  {
+                    "id": "always-ask",
+                    "label": "Always Ask",
+                    "description": "Always prompt"
+                  }
+                ],
+                "features": [
+                  {
+                    "type": "toggle",
+                    "id": "test_feature",
+                    "label": "Test feature",
+                    "description": "Deterministic provider feature used by MCP integration tests.",
+                    "value": false
+                  }
+                ],
+                "pendingPermissions": [],
+                "persistence": {
+                  "provider": "claude",
+                  "sessionId": "fixture-session-1",
+                  "metadata": {
+                    "cwd": "/fixture/project"
+                  }
+                },
+                "title": "Catalog agent B",
+                "labels": {},
+                "archivedAt": null,
+                "requiresAttention": false,
+                "attentionReason": null,
+                "attentionTimestamp": null
+              },
+              "project": {
+                "projectKey": "fixture-project",
+                "projectName": "project",
+                "workspaceName": "project",
+                "checkout": {
+                  "cwd": "/fixture/project",
+                  "isGit": false,
+                  "currentBranch": null,
+                  "remoteUrl": null,
+                  "worktreeRoot": null,
+                  "isPaseoOwnedWorktree": false,
+                  "mainRepoRoot": null
+                }
+              }
+            },
+            {
+              "agent": {
+                "id": "fixture-agent-a",
+                "provider": "codex",
+                "cwd": "/fixture/project",
+                "workspaceId": "fixture-workspace-1",
+                "model": "gpt-5.4-mini",
+                "thinkingOptionId": null,
+                "effectiveThinkingOptionId": null,
+                "runtimeInfo": {
+                  "provider": "codex",
+                  "sessionId": "fixture-session-2",
+                  "model": "gpt-5.4-mini",
+                  "modeId": "default"
+                },
+                "createdAt": "2026-11-06T00:00:00.000Z",
+                "updatedAt": "2026-11-06T00:00:00.000Z",
+                "lastUserMessageAt": null,
+                "status": "idle",
+                "activeTurn": null,
+                "capabilities": {
+                  "supportsStreaming": true,
+                  "supportsSessionPersistence": true,
+                  "supportsDynamicModes": true,
+                  "supportsMcpServers": false,
+                  "supportsReasoningStream": true,
+                  "supportsToolInvocations": true,
+                  "supportsRewindConversation": false,
+                  "supportsRewindFiles": false,
+                  "supportsRewindBoth": false
+                },
+                "currentModeId": "default",
+                "availableModes": [
+                  {
+                    "id": "bypassPermissions",
+                    "label": "Bypass",
+                    "description": "No permissions"
+                  },
+                  {
+                    "id": "default",
+                    "label": "Default",
+                    "description": "Ask for permissions"
+                  },
+                  {
+                    "id": "full-access",
+                    "label": "Full access",
+                    "description": "No prompts"
+                  },
+                  {
+                    "id": "auto",
+                    "label": "Auto",
+                    "description": "Ask/allow based on policy"
+                  },
+                  {
+                    "id": "always-ask",
+                    "label": "Always Ask",
+                    "description": "Always prompt"
+                  }
+                ],
+                "features": [
+                  {
+                    "type": "toggle",
+                    "id": "test_feature",
+                    "label": "Test feature",
+                    "description": "Deterministic provider feature used by MCP integration tests.",
+                    "value": false
+                  }
+                ],
+                "pendingPermissions": [],
+                "persistence": {
+                  "provider": "codex",
+                  "sessionId": "fixture-session-2",
+                  "metadata": {
+                    "conversationId": "fixture-session-2",
+                    "cwd": "/fixture/project"
+                  }
+                },
+                "title": "Catalog agent A",
+                "labels": {},
+                "archivedAt": null,
+                "requiresAttention": false,
+                "attentionReason": null,
+                "attentionTimestamp": null
+              },
+              "project": {
+                "projectKey": "fixture-project",
+                "projectName": "project",
+                "workspaceName": "project",
+                "checkout": {
+                  "cwd": "/fixture/project",
+                  "isGit": false,
+                  "currentBranch": null,
+                  "remoteUrl": null,
+                  "worktreeRoot": null,
+                  "isPaseoOwnedWorktree": false,
+                  "mainRepoRoot": null
+                }
+              }
+            }
+          ],
+          "pageInfo": {
+            "nextCursor": null,
+            "prevCursor": null,
+            "hasMore": false
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agents_request",
+        "requestId": "catalog-directory-key",
+        "filter": {
+          "projectKeys": ["fixture-project-catalog-key"]
+        },
+        "page": {
+          "limit": 50
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agents_response",
+        "payload": {
+          "requestId": "catalog-directory-key",
+          "entries": [],
+          "pageInfo": {
+            "nextCursor": null,
+            "prevCursor": null,
+            "hasMore": false
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agent_request",
+        "requestId": "catalog-agent",
+        "agentId": "fixture-agent-a"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agent_response",
+        "payload": {
+          "requestId": "catalog-agent",
+          "agent": {
+            "id": "fixture-agent-a",
+            "provider": "codex",
+            "cwd": "/fixture/project",
+            "workspaceId": "fixture-workspace-1",
+            "model": "gpt-5.4-mini",
+            "thinkingOptionId": null,
+            "effectiveThinkingOptionId": null,
+            "runtimeInfo": {
+              "provider": "codex",
+              "sessionId": "fixture-session-2",
+              "model": "gpt-5.4-mini",
+              "modeId": "default"
+            },
+            "createdAt": "2026-11-06T00:00:00.000Z",
+            "updatedAt": "2026-11-06T00:00:00.000Z",
+            "lastUserMessageAt": null,
+            "status": "idle",
+            "activeTurn": null,
+            "capabilities": {
+              "supportsStreaming": true,
+              "supportsSessionPersistence": true,
+              "supportsDynamicModes": true,
+              "supportsMcpServers": false,
+              "supportsReasoningStream": true,
+              "supportsToolInvocations": true,
+              "supportsRewindConversation": false,
+              "supportsRewindFiles": false,
+              "supportsRewindBoth": false
+            },
+            "currentModeId": "default",
+            "availableModes": [
+              {
+                "id": "bypassPermissions",
+                "label": "Bypass",
+                "description": "No permissions"
+              },
+              {
+                "id": "default",
+                "label": "Default",
+                "description": "Ask for permissions"
+              },
+              {
+                "id": "full-access",
+                "label": "Full access",
+                "description": "No prompts"
+              },
+              {
+                "id": "auto",
+                "label": "Auto",
+                "description": "Ask/allow based on policy"
+              },
+              {
+                "id": "always-ask",
+                "label": "Always Ask",
+                "description": "Always prompt"
+              }
+            ],
+            "features": [
+              {
+                "type": "toggle",
+                "id": "test_feature",
+                "label": "Test feature",
+                "description": "Deterministic provider feature used by MCP integration tests.",
+                "value": false
+              }
+            ],
+            "pendingPermissions": [],
+            "persistence": {
+              "provider": "codex",
+              "sessionId": "fixture-session-2",
+              "metadata": {
+                "conversationId": "fixture-session-2",
+                "cwd": "/fixture/project"
+              }
+            },
+            "title": "Catalog agent A",
+            "labels": {},
+            "archivedAt": null,
+            "requiresAttention": false,
+            "attentionReason": null,
+            "attentionTimestamp": null
+          },
+          "project": {
+            "projectKey": "fixture-project",
+            "projectName": "project",
+            "workspaceName": "project",
+            "checkout": {
+              "cwd": "/fixture/project",
+              "isGit": false,
+              "currentBranch": null,
+              "remoteUrl": null,
+              "worktreeRoot": null,
+              "isPaseoOwnedWorktree": false,
+              "mainRepoRoot": null
+            }
+          },
+          "error": null
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agents_request",
+        "requestId": "catalog-empty-agents",
+        "filter": {
+          "projectKeys": ["missing-project-key"]
+        },
+        "page": {
+          "limit": 50
+        }
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agents_response",
+        "payload": {
+          "requestId": "catalog-empty-agents",
+          "entries": [],
+          "pageInfo": {
+            "nextCursor": null,
+            "prevCursor": null,
+            "hasMore": false
+          }
+        }
+      }
+    }
+  },
+  {
+    "direction": "client",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agent_request",
+        "requestId": "catalog-missing-agent",
+        "agentId": "missing-agent"
+      }
+    }
+  },
+  {
+    "direction": "server",
+    "frame": {
+      "type": "session",
+      "message": {
+        "type": "fetch_agent_response",
+        "payload": {
+          "requestId": "catalog-missing-agent",
+          "agent": null,
+          "project": null,
+          "error": null
+        }
+      }
+    }
+  }
+]

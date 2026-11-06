@@ -17,6 +17,11 @@ const capture = JSON.parse(
 // Timeline captured at checkout a4616e73d916bfcd5cc13efc7aa9554ff641eccb with the same upstream source.
 const timeline = JSON.parse(await readFile(new URL("./timeline.json", import.meta.url), "utf8"));
 
+// Catalog captured at e4306d4d57c322c64a685e1b7915e38c5d920c0c with the same upstream source.
+// SDK compact_provider_snapshots/provider_snapshot_references=false; no conditional snapshot request.
+// Only deterministic fake Claude/Codex/OpenCode providers are enabled; other built-ins are disabled.
+const catalog = JSON.parse(await readFile(new URL("./catalog.json", import.meta.url), "utf8"));
+
 test("captured SDK handshake and project messages pass the upstream wire validators", () => {
   assert.deepEqual(
     capture.map(({ direction, frame }) => [direction, frame.message?.type ?? frame.type]),
@@ -78,4 +83,62 @@ test("real permission, assistant stream and fetched history share the canonical 
     history.entries.find(({ item }) => item.type === "assistant_message").item,
     assistant.item,
   );
+});
+
+test("real catalog frames pass upstream validators and preserve project/workspace/agent associations", () => {
+  for (const { direction, frame } of catalog) {
+    const parsed =
+      direction === "client"
+        ? WSInboundMessageSchema.safeParse(frame)
+        : validateWSOutboundMessage(frame);
+    assert.equal(parsed.success, true, JSON.stringify(parsed));
+  }
+  const payload = (id) =>
+    catalog.find(
+      ({ direction, frame }) => direction === "server" && frame.message.payload.requestId === id,
+    ).frame.message.payload;
+  const request = (id) =>
+    catalog.find(({ direction, frame }) => direction === "client" && frame.message.requestId === id)
+      .frame.message;
+  const project = payload("catalog-projects").projects[0];
+  const providers = payload("catalog-providers");
+  assert.equal(providers.compactSnapshot, undefined);
+  assert.equal(
+    providers.entries.find(({ provider }) => provider === "codex").models[0].id,
+    "gpt-5.4-mini",
+  );
+  assert.equal(providers.entries.find(({ provider }) => provider === "pi").enabled, false);
+  assert.deepEqual(request("catalog-features").draftConfig, {
+    provider: "codex",
+    cwd: "/fixture/project",
+  });
+  assert.deepEqual(payload("catalog-features").features, []);
+  assert.equal(payload("catalog-features").error, null);
+  assert.equal(request("catalog-workspaces").filter.projectId, project.projectId);
+  // AgentDirectory's projectKeys filter matches stable projectId, not the directory descriptor's projectKey.
+  assert.deepEqual(request("catalog-agents").filter.projectKeys, [project.projectId]);
+  assert.notEqual(project.projectKey, project.projectId);
+  assert.deepEqual(request("catalog-directory-key").filter.projectKeys, [project.projectKey]);
+  assert.equal(payload("catalog-directory-key").entries.length, 0);
+  const workspaces = payload("catalog-workspaces").entries;
+  const agents = payload("catalog-agents").entries;
+  assert.equal(workspaces.length, 2);
+  assert.equal(agents.length, 2);
+  for (const { agent, project: placement } of agents) {
+    assert.equal(placement.projectKey, project.projectId);
+    assert(workspaces.some(({ id }) => id === agent.workspaceId));
+    assert.equal(agent.cwd, "/fixture/project");
+  }
+  assert.deepEqual(
+    payload("catalog-agent").agent,
+    agents.find(({ agent }) => agent.id === "fixture-agent-a").agent,
+  );
+  assert.equal(payload("catalog-agent").agent.features[0].id, "test_feature");
+  assert.equal(payload("catalog-empty-agents").entries.length, 0);
+  assert.deepEqual(payload("catalog-missing-agent"), {
+    requestId: "catalog-missing-agent",
+    agent: null,
+    project: null,
+    error: null,
+  });
 });
