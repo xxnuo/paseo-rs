@@ -689,9 +689,11 @@ try {
     await expect(visibleText(`已加载 ${workspaces.entries.length} 个工作区`)).toBeVisible();
     await expect(visibleText(`已加载 ${agents.entries.length} 个Agent`)).toBeVisible();
     // testID is emitted as data-testid by the packaged DOM runtime; assert the real node here.
-    const workspaceButton = ui.getByTestId(`workspace:${workspace.id}`);
-    await expect(workspaceButton).toHaveAttribute("role", "button");
-    await workspaceButton.click();
+    const workspaceTitle = ui.getByTestId(`workspace:${workspace.id}`);
+    const workspaceButton = ui.getByRole("button").filter({ has: workspaceTitle });
+    await expect(workspaceButton).toHaveCount(1);
+    await expect(workspaceButton).toBeEnabled();
+    await workspaceTitle.click();
     await expect(visibleText(`服务商目录：${worktreeCwd}`)).toBeVisible();
     await button(`服务商：${provider.label ?? provider.provider} · 可用`).click();
     await expect(visibleText(`Fixture cwd: ${worktreeCwd}：开启`)).toBeVisible();
