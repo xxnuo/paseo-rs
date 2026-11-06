@@ -230,7 +230,12 @@ pub(crate) fn screen() -> impl IntoElement {
             return;
         }
         status.set(match parse_direct_host(&address.get_untracked()) {
-            Ok(host) if host.password.is_some() => {
+            Ok(host)
+                if host
+                    .password
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty()) =>
+            {
                 format!("地址有效（已提供密码）：{}", host.label)
             }
             Ok(host) => format!("地址有效：{}", host.label),

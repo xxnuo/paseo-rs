@@ -56,7 +56,7 @@ pub(crate) fn hello(client_id: &str, password: Option<&str>) -> Result<String, P
         "protocolVersion": 1,
         "capabilities": { "hello_rejection": true }
     });
-    if let Some(password) = password {
+    if let Some(password) = password.filter(|value| !value.is_empty()) {
         frame["auth"] = json!({ "kind": "password", "password": password });
     }
     Ok(frame.to_string())
@@ -267,6 +267,11 @@ mod tests {
         let wire: Value =
             serde_json::from_str(&hello("rust-client", Some("secret")).unwrap()).unwrap();
         assert_eq!(wire["auth"], json!({"kind":"password","password":"secret"}));
+        let empty: Value = serde_json::from_str(&hello("rust-client", Some("")).unwrap()).unwrap();
+        assert!(empty.get("auth").is_none());
+        let spaced: Value =
+            serde_json::from_str(&hello("rust-client", Some(" secret ")).unwrap()).unwrap();
+        assert_eq!(spaced["auth"]["password"], " secret ");
         assert!(hello("  ", None).is_err());
     }
 
