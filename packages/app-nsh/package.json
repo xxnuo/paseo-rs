@@ -1,0 +1,11 @@
+{
+  "name": "@getpaseo/app-nsh",
+  "version": "0.15.2",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@getpaseo/client": "0.15.2",
+    "@getpaseo/protocol": "0.15.2",
+    "@getpaseo/relay": "0.15.2"
+  }
+}
