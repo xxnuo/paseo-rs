@@ -5,6 +5,7 @@ mod host;
 #[path = "ui/host.rs"]
 mod host_ui;
 mod protocol;
+mod state;
 mod terminal_probe;
 
 use nsh_core::prelude::*;
