@@ -174,8 +174,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::{
         future,
-        sync::Arc,
-        task::{Context, Wake, Waker},
+        task::{Context, Waker},
     };
 
     fn fixtures() -> Vec<Value> {
@@ -261,15 +260,9 @@ mod tests {
         );
     }
 
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-
     #[test]
     fn the_deadline_wins_over_a_pending_or_simultaneously_ready_operation() {
-        let waker = Waker::from(Arc::new(Noop));
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut pending = pin!(race_deadline(
             future::pending::<Result<(), ClientError>>(),
             future::ready(())
