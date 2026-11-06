@@ -2,7 +2,8 @@ use url::Url;
 
 const INVALID_HOST: &str = "主机地址无效，请使用 host:port、端口号、ws://、wss:// 或 tcp:// 地址";
 
-/// Matches the direct-address grammar in protocol/src/host-target.ts.
+/// Supports the password-free direct-address subset of protocol/src/host-target.ts.
+/// Password query parameters are rejected; SSH, local sockets and pairing URLs are unsupported.
 /// The returned transport URL can contain tokens; display host_url_label instead.
 pub(crate) fn normalize_host_url(input: &str) -> Result<String, String> {
     normalize(input.trim()).ok_or_else(|| INVALID_HOST.to_owned())
@@ -27,7 +28,7 @@ fn normalize(input: &str) -> Option<String> {
         }
         let host = url.host_str()?;
         let port = url.port()?;
-        if port == 0 {
+        if port == 0 || !is_endpoint_host(host) {
             return None;
         }
         let scheme = if url
@@ -56,7 +57,17 @@ fn normalize(input: &str) -> Option<String> {
     if port.parse::<u16>().ok()? == 0 {
         return None;
     }
-    let valid_host = if let Some(ipv6) = host
+    if !is_endpoint_host(host) {
+        return None;
+    }
+    Url::parse(&format!("ws://{host}:{port}/ws"))
+        .ok()
+        .map(Into::into)
+}
+
+// TCP URLs have opaque hosts; apply upstream validatedEndpoint before converting to ws(s).
+fn is_endpoint_host(host: &str) -> bool {
+    if let Some(ipv6) = host
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
     {
@@ -71,13 +82,7 @@ fn normalize(input: &str) -> Option<String> {
             && host
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
-    };
-    if !valid_host {
-        return None;
     }
-    Url::parse(&format!("ws://{host}:{port}/ws"))
-        .ok()
-        .map(Into::into)
 }
 
 fn is_credential_free(url: &Url) -> bool {
@@ -115,6 +120,7 @@ mod tests {
             ("wss://例子.测试", "wss://xn--fsqu00a.xn--0zwm56d/ws"),
             ("ws://[::1]", "ws://[::1]/ws"),
             ("tcp://localhost:6767", "ws://localhost:6767/ws"),
+            ("tcp://my_alias:6767", "ws://my_alias:6767/ws"),
             ("tcp://[::1]:6767?ssl=true", "wss://[::1]:6767/ws"),
             ("tcp://example.com:443/?ssl=true", "wss://example.com/ws"),
         ] {
@@ -137,6 +143,20 @@ mod tests {
             ("ws://example.com/a/../custom", "ws://example.com/custom"),
         ] {
             assert_eq!(normalize_host_url(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn tcp_hosts_obey_the_upstream_endpoint_grammar_before_websocket_conversion() {
+        for input in [
+            "tcp://%6Cocalhost:6767",
+            "tcp://localhost%2Eexample:6767",
+            "tcp://例子.测试:6767",
+            "tcp://-hostname:6767",
+            "tcp://.hostname:6767",
+        ] {
+            assert_eq!(normalize_host_url(input).unwrap_err(), INVALID_HOST);
+            assert_eq!(host_url_label(input), "主机地址无效");
         }
     }
 
