@@ -1050,6 +1050,12 @@ impl Timeline {
         }
         if let Some(last) = self.rows.last().filter(|row| {
             row.span.end > base_end
+                && !self
+                    .head_boundary
+                    .turn_id
+                    .as_ref()
+                    .zip(row.turn_id.as_ref())
+                    .is_some_and(|(current, projected)| current != projected)
                 && matches!(
                     &*row.item,
                     TimelineItem::Assistant(_) | TimelineItem::Reasoning(_)
@@ -3176,5 +3182,54 @@ mod tests {
         timeline.stream(timeline.generation, anonymous("lo", Some(3)));
         assert_eq!(timeline.rows.len(), 2);
         assert_eq!(text(&timeline.rows[1]), "Hello");
+    }
+
+    #[test]
+    fn a_conflicting_known_turn_cannot_restore_a_head_with_or_without_buffered_chunks() {
+        for buffered in [false, true] {
+            let mut timeline = current(vec![user(1)], 1);
+            let mut started = turn_started();
+            if let StreamEvent::Known(KnownStreamEvent::TurnStarted { turn_id, .. }) =
+                &mut started.event
+            {
+                *turn_id = Some("turn-b".into());
+            }
+            timeline.stream(timeline.generation, started);
+            let action = timeline.catch_up(timeline.generation).remove(0);
+            if buffered {
+                assert!(
+                    timeline
+                        .stream(timeline.generation, anonymous("B", Some(3)))
+                        .is_empty()
+                );
+            }
+            let mut prefix = entry(
+                2,
+                2,
+                json!({"type":"assistant_message","text":"A"}),
+                &[(2, 2)],
+            );
+            prefix["turnId"] = json!("turn-a");
+            assert!(
+                apply(
+                    &mut timeline,
+                    &action,
+                    page(&action, "epoch", Some(2), Some(2), vec![prefix])
+                )
+                .is_empty()
+            );
+            if !buffered {
+                assert!(timeline.live_head.is_none());
+                assert!(
+                    timeline
+                        .stream(timeline.generation, anonymous("B", Some(3)))
+                        .is_empty()
+                );
+            }
+            assert_eq!(timeline.rows.len(), 3, "buffered={buffered}");
+            assert_eq!(text(&timeline.rows[1]), "A");
+            assert_eq!(text(&timeline.rows[2]), "B");
+            assert_eq!(timeline.coverage.as_ref().unwrap().contiguous.span.end, 3);
+        }
     }
 }
