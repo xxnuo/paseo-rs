@@ -54,7 +54,7 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 - [x] Execute SDK construction, Zod/generated validators, legacy relay crypto
   roundtrip and WebSocket URL validation in development QuickJS (2 tests).
 - [ ] Repeat SDK probes in release-hardened QuickJS (no dynamic constructors).
-- [ ] Build/test the Rust-root application and launch native Linux and web WASM.
+- [x] Build/test the Rust-root address surface and launch native Linux and web WASM.
 - [ ] Establish Rust WebSocket transport and typed daemon conformance tests.
 - [ ] Execute existing SDK, Zod, encryption and WebSocket in QuickJS and web.
 - [ ] Connect to an isolated real daemon: list projects, create agent, stream,
@@ -129,10 +129,18 @@ Rust-first feasibility: `native` is an independent Cargo workspace using the
 local NSH checkout. Four parser unit tests and three Rust-only headless input
 flows pass, as does clippy with warnings denied. The Rust-root GTK input flow
 passes under Xvfb; `cargo check --target wasm32-unknown-unknown --lib` passes.
-WASM checking is not a rendered browser test. This is a
-host-address validation surface, not an authenticated connection. Password URLs,
-SSH, local sockets and pairing remain separate unimplemented flows. The parser
+The Rust-root test also passes in a real headless Chrome browser using the
+generated Rust WASM runtime (`nsh test .../probes/rust-root.test.ts --target web`).
+This is a host-address validation surface, not an authenticated connection.
+Direct WS/TCP password query parameters are parsed separately from the transport
+URL with the upstream empty/duplicate/query-normalization semantics. SSH, local
+sockets and pairing remain separate unimplemented flows. The parser
 tracks the direct-address subset of `packages/protocol/src/host-target.ts`.
+
+`protocol-fixtures/direct-session.json` captures sanitized actual SDK/daemon
+hello, server_info and project-list frames. Its Node test validates both wire
+directions against the existing protocol validators; the Rust client must not
+copy the reference SDK's advertised capability list before implementing it.
 
 ```sh
 cargo test --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target
