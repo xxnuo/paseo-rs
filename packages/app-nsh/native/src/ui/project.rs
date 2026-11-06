@@ -296,6 +296,10 @@ pub(super) fn page(
                                             )
                                         })
                                     })
+                                    .test_id(&format!(
+                                        "workspace:{}",
+                                        workspace.with_untracked(|workspace| workspace.id.clone())
+                                    ))
                                     .text_color(move || theme().foreground),
                                 )
                                 .child(

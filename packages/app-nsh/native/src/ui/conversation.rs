@@ -919,11 +919,13 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
     let permission_state = state.clone();
     nav_page().title("会话").child(
         view().flex_1().pb_keyboard().bg(move || theme().background)
-            .child(view().p_3().gap_2()
-                .child(text(move || format!("会话：{}", title.get())).text_color(move || theme().foreground))
-                .child(button().on_press(back).p_2().child(text("返回 Agent 详情")))
-                .child(text(move || sync_status.get()).text_color(move || theme().muted_foreground))
-                .child(text(move || history_status.get()).text_color(move || theme().muted_foreground))
+            .child(view().p_2().gap_1()
+                .child(view().flex_row().gap_2()
+                    .child(button().on_press(back).p_2().child(text("返回 Agent 详情")))
+                    .child(text(move || format!("会话：{}", title.get())).flex_1().number_of_lines(1).text_color(move || theme().foreground)))
+                .child(view().flex_row().gap_2()
+                    .child(text(move || sync_status.get()).text_color(move || theme().muted_foreground))
+                    .child(text(move || history_status.get()).text_color(move || theme().muted_foreground)))
                 .child(view().flex_row().gap_2()
                     .child(button().on_press(move || refresh.refresh()).p_2().child(text("刷新会话")))
                     .child(button().disabled(move || !older.get() || !ready.get() || fetching.get()).on_press(move || previous.load_older()).p_2().child(text("加载更早消息")))))
@@ -950,18 +952,21 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
                     }))
             }).keys(move || rows.with(|rows| rows.iter().map(DisplayRow::key).collect::<Vec<_>>()))
                 .test_id("conversation-messages").estimated_item_size(px(90.0)).alignment(nsh_core::ListAlignment::Bottom).follow_end(px(60.0)).keyboard_taps(KeyboardTaps::Handled).flex_1())
-            .child(scroll().keyboard_taps(KeyboardTaps::Handled).max_h(px(260.0)).child(each(
+            // Reserve the composer and a readable message viewport before sizing permission forms.
+            .child(scroll().test_id("conversation-permissions").keyboard_taps(KeyboardTaps::Handled)
+                .max_h(move || px((window().height.0 - keyboard_height().0 - 286.0).clamp(48.0, 220.0))).child(each(
                 move || permissions.get(), |permission: &PendingPermission| permission.request.id.clone(),
                 move |pending, _| permission::card(permission_state.clone(), pending),
             )))
-            .child(view().p_3().gap_2().pb_safe_area_plus(px(8.0))
-                .child(text(move || notice.get()).text_color(move || theme().muted_foreground))
+            .child(view().p_2().gap_1().pb_safe_area_plus(px(8.0))
+                .child(when(move || !notice.with(String::is_empty), move || scroll().max_h(px(48.0))
+                    .child(text(move || notice.get()).text_color(move || theme().muted_foreground))))
                 .child(input().label("消息").multiline(true).value(move || draft.get()).disabled(!storage_valid)
                     .on_change(move |value: &str| { draft.set(value.to_owned()); editor.save(); })
-                    .p_3().border_1().border_color(move || theme().input).text_color(move || theme().foreground))
+                    .p_2().max_h(px(100.0)).border_1().border_color(move || theme().input).text_color(move || theme().foreground))
                 .child(view().flex_row().gap_2()
-                    .child(button().disabled(move || !ready.get() || sending.get() || stopping.get() || !storage_valid || draft.with(|text| text.trim().is_empty())).on_press(move || sender.send()).p_3().child(text("发送")))
-                    .child(button().disabled(move || stopping.get() || (!running.get() && permissions.with(Vec::is_empty))).on_press(move || stop.stop()).p_3().child(text(move || if stopping.get() { "正在停止…" } else { "停止" })))))
+                    .child(button().disabled(move || !ready.get() || sending.get() || stopping.get() || !storage_valid || draft.with(|text| text.trim().is_empty())).on_press(move || sender.send()).p_2().child(text("发送")))
+                    .child(button().disabled(move || stopping.get() || (!running.get() && permissions.with(Vec::is_empty))).on_press(move || stop.stop()).p_2().child(text(move || if stopping.get() { "正在停止…" } else { "停止" })))))
     )
 }
 
