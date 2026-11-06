@@ -88,6 +88,9 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
   reduction on the existing Client, with a native virtualized conversation page.
 - [x] Durable draft/pending sends, same-ID unknown-delivery retry, cancellation
   confirmation, permission actions and structured questions in the Rust UI.
+- [x] Same-process direct-host socket recovery: verified server identity, bounded
+  retry backoff, restored Agent route and expanded details, retained loaded history
+  and draft, and cursor-based catch-up without resending messages.
 - [ ] Complete timeline-specific todo/compaction/plugin presentation, turn
   footers, search/outline, attachments and full reconnect/cache restoration.
 - [x] Agent attention clearing on entry/input/successful send/blur, deferred
@@ -298,8 +301,40 @@ on retries; changing the backend question structure rebuilds its controls.
 The conversation stores draft text and unresolved sends before transport writes;
 restored in-flight attempts become outcome-unknown and retain their message IDs.
 Canonical user coverage removes their local duplicate, whereas provisional echoes
-only affect presentation. Host reconnection currently returns to the host screen;
-automatic conversation restoration and durable timeline caching remain open.
+only affect presentation. Unexpected transport loss temporarily returns to the
+host screen while retrying, then restores the verified project/Agent route.
+Root-owned memory retains all loaded rows, coverage and transaction state by
+server/Agent identity; a fresh subscription catches up after the saved cursor.
+Old provisional fragments remain visible but frozen, including after an empty
+same-epoch catch-up. A stale page cannot detach a newer attachment. Active sends
+become outcome-unknown and are not automatically resent. Manual disconnect or a
+new host connection clears this memory; durable timeline caching and process or
+daemon restart recovery remain open.
+
+The reconnect follow-up passes 146 Rust tests, including replacement-socket UUID,
+password reuse, route/subscription restoration, cancellation during backoff or
+handshake, authentication/protocol/server-identity rejection, directory-refresh
+recovery, retained history and old-attachment stream freezing. Format check passes.
+The actual GTK Rust UI also passes the complete real-daemon scenario in
+`/tmp/paseo-nsh-reconnect-send-live-linux.log`: exactly its physical socket is terminated,
+the seed SDK stays connected, and two committed background rows are recovered by
+an After request using the retained cursor. The UI keeps its draft and all 139
+previously loaded rows, scrolls to the earliest seeded message and the new reply,
+and returns to the expanded Agent detail. It then sends a new message through the
+recovered composer; the SDK confirms its provider start, persisted prompt and
+reply each occur once. The pre-send screenshot is retained at
+`packages/app-nsh/.nsh/evidence/chat-recovered-before-send-linux-9b973627-cbcb-4011-8fd4-c9adfe1d3726.png`.
+The strengthened Android emulator run also passes the complete scenario,
+including the actual touch-driven send after reconnect and SDK uniqueness checks
+(`/tmp/paseo-nsh-reconnect-send-live-android.log`). Its pre-send screenshot is
+`packages/app-nsh/.nsh/evidence/chat-recovered-before-send-android-edaaacba-545d-4cfa-adae-4d49ab09cdd2.png`.
+Both native runs retain 139 loaded rows, catch up to 141, then reach 143 after the
+new prompt/reply and scroll back to the earliest original row. Temporary Android
+reverse ports are removed after the runner exits. The current-source WASM check passes
+(`/tmp/paseo-nsh-reconnect-wasm.log`). The provider is fake Codex; no model inference
+or daemon restart is covered, and earlier packaged browser evidence above
+predates these changes.
+
 Agent attention now follows the upstream focus/input/send/blur rules, with a
 separate local revision protecting against stale history/clear responses. Newly
 arriving foreground attention stays deferred until interaction; permission
