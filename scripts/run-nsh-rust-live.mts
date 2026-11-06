@@ -12,6 +12,7 @@ import {
   type PaseoAgentTimelineEvent,
 } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { WebSocket, WebSocketServer } from "ws";
 import { createTestPaseoDaemon } from "../packages/server/src/server/test-utils/paseo-daemon.js";
 import { createTestAgentClients } from "../packages/server/src/server/test-utils/fake-agent-client.js";
 import { getHostName } from "../packages/server/src/server/host-name.js";
@@ -26,6 +27,66 @@ interface AndroidReverse {
   run: RunAdb;
   serial: string;
   port: string;
+}
+
+interface ObservedSocket {
+  socket: WebSocket;
+  clientId?: string;
+  requests: { type: string; agentId?: string; direction?: string; cursor?: { seq: number } }[];
+}
+
+function reconnectClientId(line: string, token: string): string | undefined {
+  const text = line.trim();
+  if (!text.startsWith(token)) return undefined;
+  const clientId = text.slice(token.length);
+  assert(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(clientId),
+    "The reconnect control requires an exact UUID on the test console line",
+  );
+  return clientId;
+}
+
+async function observedDaemon(options: Parameters<typeof createTestPaseoDaemon>[0]) {
+  const registered = new Set<WebSocketServer>();
+  const originalOn = WebSocketServer.prototype.on;
+  let fixture: Awaited<ReturnType<typeof createTestPaseoDaemon>>;
+  try {
+    // Bootstrap keeps its server private. Observe only registration while creating this fixture.
+    WebSocketServer.prototype.on = function (
+      this: WebSocketServer,
+      event: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) {
+      if (event === "connection" && this.options.path === "/ws") registered.add(this);
+      return Reflect.apply(originalOn, this, [event, listener]);
+    } as typeof originalOn;
+    fixture = await createTestPaseoDaemon(options);
+  } finally {
+    WebSocketServer.prototype.on = originalOn;
+  }
+  const servers = [...registered].filter((server) => {
+    const address = server.address();
+    return address && typeof address !== "string" && address.port === fixture.port;
+  });
+  if (servers.length !== 1) await fixture.close();
+  assert.equal(servers.length, 1, "Observe exactly this fixture's daemon WebSocketServer");
+  const server = servers[0];
+  const sockets: ObservedSocket[] = [];
+  const connection = (socket: WebSocket) => {
+    const record: ObservedSocket = { socket, requests: [] };
+    sockets.push(record);
+    socket.on("message", (data, binary) => {
+      if (binary) return;
+      const frame = JSON.parse(data.toString());
+      if (frame.type === "hello") record.clientId = frame.clientId;
+      else if (frame.type === "session") {
+        const { type, agentId, direction, cursor } = frame.message;
+        record.requests.push({ type, agentId, direction, cursor });
+      }
+    });
+  };
+  server.on("connection", connection);
+  return { fixture, sockets, dispose: () => server.off("connection", connection) };
 }
 
 async function completeTimeline(agent: PaseoAgentHandle) {
@@ -166,6 +227,9 @@ process.env.TMPDIR = scratch;
 let daemon: Awaited<ReturnType<typeof createTestPaseoDaemon>> | undefined;
 let seed: ReturnType<typeof createPaseoClient> | undefined;
 let reverse: AndroidReverse | undefined;
+let observed: Awaited<ReturnType<typeof observedDaemon>> | undefined;
+let reconnectControl: Promise<void> | undefined;
+let reconnectControlError: unknown;
 try {
   const cwd = path.join(scratch, "NSH_RUST_FIXTURE");
   const worktreeCwd = path.join(scratch, "NSH_RUST_WORKTREE");
@@ -231,7 +295,7 @@ try {
   agentClients.codex.listFeatures = async (config) => [
     { type: "toggle", id: "fixture_cwd", label: `Fixture cwd: ${config.cwd}`, value: true },
   ];
-  daemon = await createTestPaseoDaemon({
+  observed = await observedDaemon({
     paseoHomeRoot: path.join(scratch, "daemon"),
     staticDir: path.join(scratch, "static"),
     cleanup: false,
@@ -239,6 +303,7 @@ try {
     pluginsEnabled: false,
     agentClients,
   });
+  daemon = observed.fixture;
   const url = `ws://127.0.0.1:${daemon.port}/ws`;
   seed = createPaseoClient({
     url,
@@ -369,6 +434,106 @@ try {
     afterReply: "NSH_CHAT_AFTER_CANCEL",
     allow: permissionActions[0],
     deny: permissionActions[1],
+  };
+  const offline = { user: "NSH_OFFLINE_USER", reply: "NSH_OFFLINE_REPLY", messageId: randomUUID() };
+  const trigger = `NSH_RECONNECT_TRIGGER:${randomUUID()}:`;
+  const socketObserver = observed;
+  const oracleClient = seed;
+  const liveDaemon = daemon;
+  const seedId = socketObserver.sockets.find(
+    (record) => record.socket.readyState === WebSocket.OPEN,
+  )?.clientId;
+  assert(seedId, "The observer must identify the connected seed SDK hello");
+  let terminated: ObservedSocket | undefined;
+  let appended = false;
+  const disconnectAndAppend = async (clientId: string) => {
+    assert(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(clientId));
+    assert.notEqual(clientId, seedId, "The seed SDK must never be the disconnect target");
+    assert.equal(terminated, undefined, "The disconnect control is single use");
+    const matches = socketObserver.sockets.filter(
+      (record) => record.clientId === clientId && record.socket.readyState === WebSocket.OPEN,
+    );
+    assert.equal(
+      matches.length,
+      1,
+      "Terminate only the exact live hello UUID requested by this test",
+    );
+    terminated = matches[0];
+    const closed = new Promise<void>((resolve) =>
+      terminated!.socket.once("close", () => resolve()),
+    );
+    terminated.socket.terminate();
+    await closed;
+    await liveDaemon.daemon.agentManager.appendTimelineItem(worktreeAgent.id, {
+      type: "user_message",
+      text: offline.user,
+      messageId: offline.messageId,
+      clientMessageId: offline.messageId,
+    });
+    await liveDaemon.daemon.agentManager.appendTimelineItem(worktreeAgent.id, {
+      type: "assistant_message",
+      text: offline.reply,
+    });
+    appended = true;
+    assert.equal(oracleClient.getConnectionState().status, "connected");
+    assert(
+      (await oracleClient.projects.list()).projects.some(
+        (entry) => entry.projectId === project.projectId,
+      ),
+    );
+    console.log(
+      "Reconnect control: terminated one matching UI socket; seed SDK remains connected; two background rows committed",
+    );
+  };
+  const verifyRecovery = async () => {
+    assert(
+      terminated && appended,
+      "The fixture must complete its exact disconnect and background append",
+    );
+    const fetched = await completeTimeline(worktreeAgent);
+    for (let index = 0; index < historyTurns; index += 1) {
+      const ordinal = String(index).padStart(3, "0");
+      for (const text of [`NSH_HISTORY_USER_${ordinal}`, `NSH_HISTORY_REPLY_${ordinal}`]) {
+        assert.equal(
+          fetched.entries.filter(
+            (entry) =>
+              (entry.item.type === "user_message" || entry.item.type === "assistant_message") &&
+              entry.item.text === text,
+          ).length,
+          1,
+        );
+      }
+    }
+    for (const text of [offline.user, offline.reply]) {
+      assert.equal(
+        fetched.entries.filter(
+          (entry) =>
+            (entry.item.type === "user_message" || entry.item.type === "assistant_message") &&
+            entry.item.text === text,
+        ).length,
+        1,
+      );
+    }
+    const targetId = terminated.clientId;
+    const reconnect = socketObserver.sockets.filter((record) => record.clientId === targetId)[1];
+    assert(reconnect, "The same client UUID must actually handshake on a replacement socket");
+    assert(
+      reconnect.requests.some(
+        (request) =>
+          request.type === "fetch_agent_timeline_request" &&
+          request.agentId === worktreeAgent.id &&
+          request.direction === "after" &&
+          request.cursor &&
+          request.cursor.seq > 0,
+      ),
+      "The resumed Agent must fetch the missing range with its retained history cursor",
+    );
+    assert.equal(
+      socketObserver.sockets.filter((record) => record.clientId === seedId).length,
+      1,
+      "The seed SDK must not reconnect",
+    );
+    assert.equal(oracleClient.getConnectionState().status, "connected");
   };
   const verifyChat = async () => {
     const fetched = await completeTimeline(worktreeAgent);
@@ -554,6 +719,47 @@ try {
       } finally {
         await observation.release();
       }
+      const probeId = randomUUID();
+      assert.equal(reconnectClientId(`unrelated message ${trigger}${probeId}`, trigger), undefined);
+      assert.equal(reconnectClientId(`${trigger}${probeId}`, trigger), probeId);
+      assert.throws(() => reconnectClientId(`${trigger}${probeId} trailing text`, trigger));
+      const probe = createPaseoClient({
+        url,
+        clientId: probeId,
+        appVersion: "0.15.2",
+        reconnect: { enabled: false },
+      });
+      let resumed: ReturnType<typeof createPaseoClient> | undefined;
+      try {
+        await probe.connect();
+        const before = await probe.agents
+          .ref(worktreeAgent.id)
+          .timeline.refetch({ direction: "tail", limit: 50, projection: "projected" });
+        assert(before.endCursor);
+        await disconnectAndAppend(probeId);
+        assert.equal(terminated?.socket.readyState, WebSocket.CLOSED);
+        resumed = createPaseoClient({
+          url,
+          clientId: probeId,
+          appVersion: "0.15.2",
+          reconnect: { enabled: false },
+        });
+        await resumed.connect();
+        const filled = await resumed.agents.ref(worktreeAgent.id).timeline.refetch({
+          direction: "after",
+          cursor: before.endCursor,
+          projection: "projected",
+        });
+        assert.equal(filled.error, null);
+        assert(
+          filled.entries.some(
+            (entry) => entry.item.type === "assistant_message" && entry.item.text === offline.reply,
+          ),
+        );
+        await verifyRecovery();
+      } finally {
+        await Promise.allSettled([probe.close(), resumed?.close()]);
+      }
     } finally {
       await driver.close();
     }
@@ -569,6 +775,8 @@ try {
         sameKeyDeduplicated: true,
         historyPages: history.pages,
         chatSendToolPermissionCancelVerified: true,
+        exactSocketDisconnectAndAfterCatchupVerified: true,
+        daemonRestartTested: false,
         fixture: "ready",
         rustUiExecuted: false,
       }),
@@ -601,6 +809,7 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   const projectButton = ${JSON.stringify(`role:button[${project.projectDisplayName}]`)};
   const creation = ${JSON.stringify(uiCreation)};
   const chat = ${JSON.stringify(chat)};
+  const offline = ${JSON.stringify(offline)};
   await app.waitFor("连接开发主机");
   expect(app.enabled(connect)).toBe(false);
   expect(app.enabled(refresh)).toBe(false);
@@ -780,6 +989,21 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   await app.waitFor("text:会话已同步", { timeout: 15000 });
   await loadEarlier("text:" + chat.afterReply);
   await revealMessage("text:" + chat.plainReply, -1);
+  const reconnectCount = historyCount();
+  const reconnectDraft = "NSH_RECONNECT_DRAFT";
+  await app.clear(message);
+  await app.type(message, reconnectDraft);
+  expect(app.value(message)).toBe(reconnectDraft);
+  console.log(${JSON.stringify(trigger)} + clientId);
+  await app.waitUntil(() => historyCount() === reconnectCount + 2, { timeout: 30000 });
+  await app.waitFor("text:会话已同步", { timeout: 15000 });
+  expect(app.value(message)).toBe(reconnectDraft);
+  expect(app.storage()["paseo.nsh.client-id"]).toBe(clientId);
+  expect(app.enabled(send)).toBe(true);
+  await revealMessage("text:" + offline.reply, 1);
+  await loadEarlier("text:" + offline.reply, reconnectCount + 2);
+  await revealMessage("text:" + chat.afterReply, -1);
+  await app.clear(message);
   await app.press(returnDetail);
   await app.waitFor(directory.detail);
   await app.press("role:button[返回项目列表]");
@@ -826,7 +1050,39 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
     const args = ["test", testFile];
     if (target !== "headless") args.push("--target", target);
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(path.resolve(command), args, { cwd: appDirectory, stdio: "inherit" });
+      const child = spawn(path.resolve(command), args, {
+        cwd: appDirectory,
+        stdio: ["inherit", "pipe", "pipe"],
+      });
+      const observeOutput = (destination: NodeJS.WriteStream) => {
+        let pending = "";
+        return (chunk: Buffer) => {
+          destination.write(chunk);
+          pending += chunk.toString();
+          const lines = pending.split(/\r?\n/);
+          pending = lines.pop() ?? "";
+          for (const line of lines) {
+            try {
+              const clientId = reconnectClientId(line, trigger);
+              if (!clientId) continue;
+              assert.equal(
+                reconnectControl,
+                undefined,
+                "The test's one-shot reconnect token was repeated",
+              );
+              reconnectControl = disconnectAndAppend(clientId).catch((error) => {
+                reconnectControlError = error;
+                child.kill("SIGTERM");
+              });
+            } catch (error) {
+              reconnectControlError = error;
+              child.kill("SIGTERM");
+            }
+          }
+        };
+      };
+      child.stdout.on("data", observeOutput(process.stdout));
+      child.stderr.on("data", observeOutput(process.stderr));
       const timeout = setTimeout(() => child.kill("SIGKILL"), 420_000);
       const interrupt = () => child.kill("SIGTERM");
       const cleanup = () => {
@@ -843,9 +1099,16 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
       child.once("close", (code, signal) => {
         cleanup();
         if (code === 0) resolve();
-        else reject(new Error(`Rust UI verification exited with ${signal ?? code}`));
+        else
+          reject(
+            reconnectControlError ??
+              new Error(`Rust UI verification exited with ${signal ?? code}`),
+          );
       });
     });
+    assert(reconnectControl, "The real UI test must request its one-shot forced disconnect");
+    await reconnectControl;
+    if (reconnectControlError) throw reconnectControlError;
     const after = await seed.agents.list({ filter: { projectKeys: [project.projectId] } });
     assert.equal(after.pageInfo.hasMore, false);
     assert.equal(
@@ -867,14 +1130,19 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
       }
     }
     await verifyChat();
+    await verifyRecovery();
     console.log(
       "Rust UI creation verified by SDK: two unique worktree Agents, defaults and explicit options",
     );
     console.log(
       "Rust UI chat verified by SDK: paged history, tool actions, cancellation and unique persisted messages",
     );
+    console.log(
+      "Rust UI recovery verified: one exact socket terminated, same UUID resumed, draft/history retained and background rows caught up; no daemon restart",
+    );
   }
 } finally {
+  await reconnectControl;
   const closing = await Promise.allSettled([
     seed?.close(),
     reverse ? removeReverse(reverse) : undefined,
@@ -882,6 +1150,7 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   try {
     await daemon?.close();
   } finally {
+    observed?.dispose();
     if (previousTmpdir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTmpdir;
     await rm(testFile, { force: true });
