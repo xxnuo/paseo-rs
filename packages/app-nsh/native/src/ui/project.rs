@@ -249,6 +249,7 @@ pub(super) fn page(
     let refresh_workspaces = state.clone();
     let more_workspaces = state.clone();
     let refresh_agents = state.clone();
+    let read_state = state.clone();
     let more_agents = state.clone();
     let agent_client = state.client.clone();
     let provider_client = state.client.clone();
@@ -283,30 +284,95 @@ pub(super) fn page(
                         move || workspaces.get(),
                         |workspace: &Rc<Workspace>| workspace.id.clone(),
                         move |workspace, _| {
-                            button()
-                                .on_press(move || selected.set(vec![workspace.get_untracked()]))
-                                .p_3()
+                            let read_state = read_state.clone();
+                            let request = RequestTask::new();
+                            let busy = signal(false);
+                            let status = signal(String::new());
+                            view()
+                                .gap_1()
                                 .child(
-                                    text(move || {
+                                    button()
+                                        .on_press(move || {
+                                            selected.set(vec![workspace.get_untracked()])
+                                        })
+                                        .p_3()
+                                        .child(
+                                            text(move || {
+                                                workspace.with(|workspace| {
+                                                    format!(
+                                                        "工作区：{} · {}",
+                                                        workspace.name,
+                                                        workspace_status(&workspace.status)
+                                                    )
+                                                })
+                                            })
+                                            .test_id(&format!(
+                                                "workspace:{}",
+                                                workspace.with_untracked(|workspace| workspace
+                                                    .id
+                                                    .clone())
+                                            ))
+                                            .text_color(move || theme().foreground),
+                                        )
+                                        .child(
+                                            text(move || {
+                                                workspace.with(|workspace| {
+                                                    workspace.directory().to_owned()
+                                                })
+                                            })
+                                            .text_color(move || theme().muted_foreground),
+                                        ),
+                                )
+                                .child(when(
+                                    move || {
                                         workspace.with(|workspace| {
-                                            format!(
-                                                "工作区：{} · {}",
-                                                workspace.name,
-                                                workspace_status(&workspace.status)
+                                            matches!(
+                                                workspace.status,
+                                                WorkspaceStatus::Attention
+                                                    | WorkspaceStatus::Failed
                                             )
                                         })
-                                    })
-                                    .test_id(&format!(
-                                        "workspace:{}",
-                                        workspace.with_untracked(|workspace| workspace.id.clone())
-                                    ))
-                                    .text_color(move || theme().foreground),
-                                )
+                                    },
+                                    move || {
+                                        let state = read_state.clone();
+                                        let request = request.clone();
+                                        button()
+                                            .disabled(move || busy.get())
+                                            .on_press(move || {
+                                                if busy.get_untracked() {
+                                                    return;
+                                                }
+                                                let id = workspace.with_untracked(|workspace| {
+                                                    workspace.id.clone()
+                                                });
+                                                let state = state.clone();
+                                                busy.set(true);
+                                                status.set(String::new());
+                                                request.start(async move {
+                                                    match state
+                                                        .client
+                                                        .clear_workspace_attention(&id)
+                                                        .await
+                                                    {
+                                                        Ok(_) => {
+                                                            busy.set(false);
+                                                            state.load_workspaces(false);
+                                                            state.load_agents(false);
+                                                            return;
+                                                        }
+                                                        Err(error) => status
+                                                            .set(format!("标为已读失败：{error}")),
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            })
+                                            .p_3()
+                                            .child(text("工作区标为已读"))
+                                    },
+                                ))
                                 .child(
-                                    text(move || {
-                                        workspace.with(|workspace| workspace.directory().to_owned())
-                                    })
-                                    .text_color(move || theme().muted_foreground),
+                                    text(move || status.get())
+                                        .text_color(move || theme().muted_foreground),
                                 )
                         },
                     ))

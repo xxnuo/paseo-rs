@@ -6,6 +6,7 @@ use crate::{
     client::{Client, EventRegistration},
     protocol::{catalog::AgentStatus, conversation::*},
     state::{
+        attention::{Attention, Trigger},
         conversation::{
             CancelStatus, ConversationState, PendingMessage, PendingPermission, SendStatus,
         },
@@ -166,6 +167,10 @@ struct Conversation {
     storage_valid: bool,
     timeline: RefCell<Timeline>,
     transactions: RefCell<ConversationState>,
+    attention: RefCell<Attention>,
+    attention_busy: Cell<bool>,
+    attention_queued: Cell<bool>,
+    attention_revision: Cell<u64>,
     live_revision: Cell<u64>,
     history_task: Rc<RequestTask>,
     jobs: RefCell<Vec<Spawned<()>>>,
@@ -187,6 +192,41 @@ struct Conversation {
 }
 
 impl Conversation {
+    fn clear_attention(self: &Rc<Self>, trigger: Trigger) {
+        if !self.active.get() || !self.client.is_connected() {
+            return;
+        }
+        if !self.attention.borrow_mut().trigger(trigger) {
+            return;
+        }
+        self.send_attention_clear();
+    }
+
+    fn send_attention_clear(self: &Rc<Self>) {
+        if self.attention_busy.replace(true) {
+            self.attention_queued.set(true);
+            return;
+        }
+        let revision = self.attention_revision.get();
+        let state = self.clone();
+        self.job(async move {
+            let result = state.client.clear_agent_attention(&state.id).await;
+            state.attention_busy.set(false);
+            if !state.active.get() {
+                return;
+            }
+            if result.is_ok() && state.attention_revision.get() == revision {
+                state
+                    .attention_revision
+                    .set(state.attention_revision.get().wrapping_add(1));
+                state.attention.borrow_mut().update(false, false);
+            }
+            if state.attention_queued.replace(false) {
+                state.clear_attention(Trigger::InputFocus);
+            }
+        });
+    }
+
     fn open_link(self: &Rc<Self>, url: String) {
         if !external_http_url(&url) {
             return;
@@ -294,6 +334,10 @@ impl Conversation {
     }
 
     fn dispose(&self) {
+        if self.client.is_connected() && self.attention.borrow_mut().trigger(Trigger::AgentBlur) {
+            self.client
+                .clear_agent_attention_after_page(self.id.clone());
+        }
         self.active.set(false);
         self.timeline.borrow_mut().detach();
         self.listeners.borrow_mut().clear();
@@ -308,7 +352,30 @@ impl Conversation {
         self.actions(vec![action]);
     }
 
-    fn snapshot(&self, snapshot: &Snapshot, revision: u64, permission_revision: u64) {
+    fn snapshot(
+        self: &Rc<Self>,
+        snapshot: &Snapshot,
+        revision: u64,
+        permission_revision: u64,
+        attention_revision: u64,
+    ) {
+        if attention_revision == self.attention_revision.get() {
+            self.attention_revision
+                .set(self.attention_revision.get().wrapping_add(1));
+            let clear = self.attention.borrow_mut().snapshot(
+                snapshot.agent.extra.get("requiresAttention")
+                    == Some(&serde_json::Value::Bool(true)),
+                snapshot
+                    .agent
+                    .extra
+                    .get("attentionReason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("permission"),
+            );
+            if clear {
+                self.send_attention_clear();
+            }
+        }
         if self.live_revision.get() == revision {
             self.transactions
                 .borrow_mut()
@@ -386,18 +453,35 @@ impl Conversation {
                 .transactions
                 .borrow_mut()
                 .resolve_permission(&self.id, &resolved.request_id),
+            ConversationMessage::AttentionRequired(event) => {
+                self.attention_revision
+                    .set(self.attention_revision.get().wrapping_add(1));
+                self.attention
+                    .borrow_mut()
+                    .update(true, matches!(event.reason, AttentionReason::Permission));
+            }
             ConversationMessage::AgentStatus(update) => {
                 self.live_revision
                     .set(self.live_revision.get().wrapping_add(1));
                 let revision = self.live_revision.get();
                 let permissions = self.transactions.borrow().permission_revision();
-                self.snapshot(&update.info, revision, permissions);
+                self.snapshot(
+                    &update.info,
+                    revision,
+                    permissions,
+                    self.attention_revision.get(),
+                );
             }
             ConversationMessage::AgentUpdate(AgentUpdate::Upsert { agent, .. }) => {
                 self.live_revision
                     .set(self.live_revision.get().wrapping_add(1));
                 let permissions = self.transactions.borrow().permission_revision();
-                self.snapshot(agent, self.live_revision.get(), permissions);
+                self.snapshot(
+                    agent,
+                    self.live_revision.get(),
+                    permissions,
+                    self.attention_revision.get(),
+                );
             }
             ConversationMessage::AgentUpdate(AgentUpdate::Remove { .. }) => {
                 self.timeline.borrow_mut().detach();
@@ -543,6 +627,7 @@ impl Conversation {
         );
         let revision = self.live_revision.get();
         let permission_revision = self.transactions.borrow().permission_revision();
+        let attention_revision = self.attention_revision.get();
         let state = self.clone();
         self.history_task.start(async move {
             let result = state.client.fetch_timeline(&state.id, &options).await;
@@ -552,7 +637,7 @@ impl Conversation {
             let actions = match result {
                 Ok(history) => {
                     if let Some(snapshot) = &history.agent {
-                        state.snapshot(snapshot, revision, permission_revision);
+                        state.snapshot(snapshot, revision, permission_revision, attention_revision);
                     }
                     state
                         .timeline
@@ -699,10 +784,15 @@ impl Conversation {
                 return;
             }
             match result {
-                Ok(reply) => state
-                    .transactions
-                    .borrow_mut()
-                    .sent(&state.id, &id, attempt, &reply),
+                Ok(reply) => {
+                    state
+                        .transactions
+                        .borrow_mut()
+                        .sent(&state.id, &id, attempt, &reply);
+                    if reply.accepted {
+                        state.clear_attention(Trigger::PromptSend);
+                    }
+                }
                 Err(error) => state.transactions.borrow_mut().send_unknown(
                     &state.id,
                     &id,
@@ -871,6 +961,10 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
         storage_valid,
         timeline: RefCell::new(Timeline::new(id.clone())),
         transactions: RefCell::new(transactions),
+        attention: RefCell::new(Attention::default()),
+        attention_busy: Cell::new(false),
+        attention_queued: Cell::new(false),
+        attention_revision: Cell::new(0),
         live_revision: Cell::new(0),
         history_task: RequestTask::new(),
         jobs: RefCell::new(Vec::new()),
@@ -897,6 +991,14 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
     let cleanup_state = state.clone();
     cleanup(move || cleanup_state.dispose());
     state.start();
+    let visibility_state = state.clone();
+    effect(move || {
+        let viewed = lifecycle() == nsh_core::platform::Lifecycle::Active;
+        let clear = visibility_state.attention.borrow_mut().visibility(viewed);
+        if clear && visibility_state.active.get() && visibility_state.client.is_connected() {
+            visibility_state.send_attention_clear();
+        }
+    });
     let rows = state.rows;
     let permissions = state.permissions;
     let title = state.title;
@@ -915,6 +1017,7 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
     let sender = state.clone();
     let stop = state.clone();
     let editor = state.clone();
+    let focus = state.clone();
     let retry = state.clone();
     let permission_state = state.clone();
     nav_page().title("会话").child(
@@ -962,6 +1065,7 @@ pub(super) fn page(client: Rc<Client>, id: String, back: impl Fn() + 'static) ->
                 .child(when(move || !notice.with(String::is_empty), move || scroll().max_h(px(48.0))
                     .child(text(move || notice.get()).text_color(move || theme().muted_foreground))))
                 .child(input().label("消息").multiline(true).value(move || draft.get()).disabled(!storage_valid)
+                    .on_focus(move |_: &()| focus.clear_attention(Trigger::InputFocus))
                     .on_change(move |value: &str| { draft.set(value.to_owned()); editor.save(); })
                     .p_2().max_h(px(100.0)).border_1().border_color(move || theme().input).text_color(move || theme().foreground))
                 .child(view().flex_row().gap_2()
