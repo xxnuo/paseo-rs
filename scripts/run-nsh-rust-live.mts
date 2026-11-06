@@ -32,7 +32,74 @@ interface AndroidReverse {
 interface ObservedSocket {
   socket: WebSocket;
   clientId?: string;
-  requests: { type: string; agentId?: string; direction?: string; cursor?: { seq: number } }[];
+  requests: {
+    type: string;
+    agentId?: string;
+    direction?: string;
+    cursor?: { seq: number };
+  }[];
+}
+
+interface QueryBounds {
+  origin: { x: number; y: number };
+  size: { width: number; height: number };
+}
+
+function messageViewport(frame: QueryBounds | null, viewport: { width: number; height: number }) {
+  if (!frame) return null;
+  const left = Math.max(0, frame.origin.x);
+  const top = Math.max(0, frame.origin.y);
+  const right = Math.min(viewport.width, frame.origin.x + frame.size.width);
+  const bottom = Math.min(viewport.height, frame.origin.y + frame.size.height);
+  return [left, top, right, bottom].every(Number.isFinite) && right > left && bottom > top
+    ? { left, top, right, bottom }
+    : null;
+}
+
+function messageVisible(target: QueryBounds | null, frame: ReturnType<typeof messageViewport>) {
+  if (!target || !frame || target.size.width <= 0 || target.size.height <= 0) return false;
+  const x = target.origin.x + target.size.width / 2;
+  const y = target.origin.y + target.size.height / 2;
+  return (
+    Number.isFinite(x) &&
+    Number.isFinite(y) &&
+    x >= frame.left &&
+    x < frame.right &&
+    y >= frame.top &&
+    y < frame.bottom
+  );
+}
+
+if (command === "--self-test-viewport") {
+  const rect = (x: number, y: number, width: number, height: number): QueryBounds => ({
+    origin: { x, y },
+    size: { width, height },
+  });
+  const viewport = { width: 390, height: 844 };
+  const frame = messageViewport(rect(0, 100, 390, 300), viewport);
+  assert(messageVisible(rect(12, 120, 100, 20), frame));
+  assert(
+    !messageVisible(rect(12, 500, 100, 20), frame),
+    "An overscan row below the list is not visible",
+  );
+  assert(
+    !messageVisible(rect(12, 395, 100, 20), frame),
+    "A clipped sliver does not expose the reply's center",
+  );
+  assert(!messageVisible(null, frame));
+  assert(!messageVisible(rect(12, 120, 0, 20), frame));
+  assert(!messageVisible(rect(Number.NaN, 120, 100, 20), frame));
+  assert.equal(messageViewport(rect(0, 100, 390, 0), viewport), null);
+  const clipped = messageViewport(rect(-20, 700, 500, 500), viewport);
+  assert(messageVisible(rect(12, 800, 100, 20), clipped));
+  assert(
+    !messageVisible(rect(12, 850, 100, 20), clipped),
+    "The window also clips the scroll frame",
+  );
+  console.log(
+    "Viewport self-check passed: overscan, list/window clipping and unavailable geometry",
+  );
+  process.exit(0);
 }
 
 function reconnectClientId(line: string, token: string): string | undefined {
@@ -86,7 +153,11 @@ async function observedDaemon(options: Parameters<typeof createTestPaseoDaemon>[
     });
   };
   server.on("connection", connection);
-  return { fixture, sockets, dispose: () => server.off("connection", connection) };
+  return {
+    fixture,
+    sockets,
+    dispose: () => server.off("connection", connection),
+  };
 }
 
 async function completeTimeline(agent: PaseoAgentHandle) {
@@ -293,7 +364,12 @@ try {
   // Deliberate fake catalog marker: proves the Rust draft RPC used the selected worktree cwd.
   // This is fixture metadata only, and never sends a prompt or invokes a model.
   agentClients.codex.listFeatures = async (config) => [
-    { type: "toggle", id: "fixture_cwd", label: `Fixture cwd: ${config.cwd}`, value: true },
+    {
+      type: "toggle",
+      id: "fixture_cwd",
+      label: `Fixture cwd: ${config.cwd}`,
+      value: true,
+    },
   ];
   observed = await observedDaemon({
     paseoHomeRoot: path.join(scratch, "daemon"),
@@ -323,7 +399,11 @@ try {
   assert(project, "The real SDK must observe the seeded project before running Rust UI");
   assert.equal(project.projectDisplayName, "NSH_RUST_FIXTURE");
   const worktree = await seed.workspaces.create({
-    source: { kind: "directory", path: worktreeCwd, projectId: project.projectId },
+    source: {
+      kind: "directory",
+      path: worktreeCwd,
+      projectId: project.projectId,
+    },
   });
   const worktreeAgent = await worktree.agents.create({
     config: { provider: "codex/gpt-5.4-mini", modeId: "default" },
@@ -352,7 +432,10 @@ try {
   assert(detail, "The SDK must read the seeded Agent detail");
   assert.equal(detail.cwd, worktreeCwd);
   assert.equal(detail.status, "idle");
-  const providers = await seed.providers.waitForReady({ cwd: worktreeCwd, timeoutMs: 15_000 });
+  const providers = await seed.providers.waitForReady({
+    cwd: worktreeCwd,
+    timeoutMs: 15_000,
+  });
   const provider = providers.entries.find((entry) => entry.provider === detail.provider);
   assert(provider && provider.enabled && provider.status === "ready");
   assert(
@@ -366,7 +449,12 @@ try {
   });
   assert.equal(features.error, null);
   assert.deepEqual(features.features, [
-    { type: "toggle", id: "fixture_cwd", label: `Fixture cwd: ${worktreeCwd}`, value: true },
+    {
+      type: "toggle",
+      id: "fixture_cwd",
+      label: `Fixture cwd: ${worktreeCwd}`,
+      value: true,
+    },
   ]);
   const explicitModel = provider.models.find((model) => model.isSelectable !== false);
   const explicitMode = provider.modes.find((mode) => mode.id !== provider.defaultModeId);
@@ -374,7 +462,11 @@ try {
   const uiCreation = {
     defaultsTitle: "NSH_UI_DEFAULTS",
     explicitTitle: "NSH_UI_EXPLICIT",
-    storageKey: `paseo.nsh.creation:${JSON.stringify([daemon.daemon.getServerId(), workspace.id, provider.provider])}`,
+    storageKey: `paseo.nsh.creation:${JSON.stringify([
+      daemon.daemon.getServerId(),
+      workspace.id,
+      provider.provider,
+    ])}`,
     model: explicitModel.id,
     mode: explicitMode.id,
     modelButton: `role:button[模型：${explicitModel.label}]`,
@@ -387,10 +479,16 @@ try {
     workspace: `id:workspace:${workspace.id}`,
     provider: `role:button[服务商：${provider.label ?? provider.provider} · 可用]`,
     cwd: `text:服务商目录：${worktreeCwd}`,
-    catalog: `text:服务商 ID：${provider.provider}\n模型\n${provider.models.map((model) => `${model.label}（${model.id}）`).join("\n")}\n模式\n${provider.modes.map((mode) => `${mode.label}（${mode.id}）`).join("\n")}`,
+    catalog: `text:服务商 ID：${provider.provider}\n模型\n${provider.models
+      .map((model) => `${model.label}（${model.id}）`)
+      .join("\n")}\n模式\n${provider.modes
+      .map((mode) => `${mode.label}（${mode.id}）`)
+      .join("\n")}`,
     features: `text:Fixture cwd: ${worktreeCwd}：开启`,
     agent: `role:button[Agent：${agentEntry.agent.title ?? agentEntry.agent.id} · 空闲]`,
-    detail: `text:Agent ID：${detail.id}\n服务商：${detail.provider}\n模型：${detail.model ?? "未指定"}\n模式：${detail.currentModeId ?? "未指定"}\n状态：空闲\n工作目录：${detail.cwd}`,
+    detail: `text:Agent ID：${detail.id}\n服务商：${detail.provider}\n模型：${
+      detail.model ?? "未指定"
+    }\n模式：${detail.currentModeId ?? "未指定"}\n状态：空闲\n工作目录：${detail.cwd}`,
     workspaces: `text:已加载 ${workspaces.entries.length} 个工作区`,
     agents: `text:已加载 ${agents.entries.length} 个Agent`,
   };
@@ -437,7 +535,11 @@ try {
     allow: permissionActions[0],
     deny: permissionActions[1],
   };
-  const offline = { user: "NSH_OFFLINE_USER", reply: "NSH_OFFLINE_REPLY", messageId: randomUUID() };
+  const offline = {
+    user: "NSH_OFFLINE_USER",
+    reply: "NSH_OFFLINE_REPLY",
+    messageId: randomUUID(),
+  };
   const trigger = `NSH_RECONNECT_TRIGGER:${randomUUID()}:`;
   const socketObserver = observed;
   const oracleClient = seed;
@@ -643,7 +745,11 @@ try {
       );
       assert.equal(wholeTurnTail.entries.length, 50);
       const defaults = {
-        config: { provider: provider.provider, cwd: worktreeCwd, title: "NSH_ORACLE_DEFAULTS" },
+        config: {
+          provider: provider.provider,
+          cwd: worktreeCwd,
+          title: "NSH_ORACLE_DEFAULTS",
+        },
         workspaceId: workspace.id,
         idempotencyKey: randomUUID(),
       };
@@ -672,7 +778,9 @@ try {
       assert.equal(explicit.workspaceId, workspace.id);
       assert.equal(explicit.model, uiCreation.model);
       assert.equal(explicit.currentModeId, uiCreation.mode);
-      const after = await seed.agents.list({ filter: { projectKeys: [project.projectId] } });
+      const after = await seed.agents.list({
+        filter: { projectKeys: [project.projectId] },
+      });
       assert.equal(after.entries.length, agents.entries.length + 2);
 
       const stream: PaseoAgentTimelineEvent[] = [];
@@ -757,9 +865,11 @@ try {
       let resumed: ReturnType<typeof createPaseoClient> | undefined;
       try {
         await probe.connect();
-        const before = await probe.agents
-          .ref(worktreeAgent.id)
-          .timeline.refetch({ direction: "tail", limit: 50, projection: "projected" });
+        const before = await probe.agents.ref(worktreeAgent.id).timeline.refetch({
+          direction: "tail",
+          limit: 50,
+          projection: "projected",
+        });
         assert(before.endCursor);
         await disconnectAndAppend(probeId);
         assert.equal(terminated?.socket.readyState, WebSocket.CLOSED);
@@ -949,12 +1059,22 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
     const match = app.texts().map((value) => /^已加载 ([0-9]+) 条历史消息$/.exec(value.trim())).find(Boolean);
     return match ? Number(match[1]) : 0;
   };
+  const messageViewport = ${messageViewport.toString()};
+  const messageVisible = ${messageVisible.toString()};
+  const visibleMessageFrame = () => messageViewport(app.bounds("id:conversation-messages"), app.viewport());
+  const isMessageVisible = (selector: string) => messageVisible(app.bounds(selector), visibleMessageFrame());
   const revealMessage = async (selector: string, direction: number) => {
-    // Virtual rows must first be materialized by real scroll gestures; text queries cannot seek them.
-    for (let step = 0; step < Math.max(historyCount() * 2, 20) && !app.shows(selector); step += 1) {
-      await app.scroll("id:conversation-messages", direction * 160);
+    await app.waitUntil(() => visibleMessageFrame() !== null);
+    // Text matching includes overscan rows; require the native target center inside the actual list viewport.
+    for (let step = 0; step < Math.max(historyCount() * 2, 20) && !isMessageVisible(selector); step += 1) {
+      const frame = visibleMessageFrame();
+      if (!frame) throw new Error("The conversation has no visible message viewport");
+      const target = app.bounds(selector);
+      const stride = (frame.bottom - frame.top) * 0.75;
+      const distance = target ? target.origin.y + target.size.height / 2 - (frame.top + frame.bottom) / 2 : direction * stride;
+      await app.scroll("id:conversation-messages", Math.max(-stride, Math.min(stride, distance)));
     }
-    await app.waitFor(selector);
+    await app.waitUntil(() => isMessageVisible(selector));
   };
   const loadEarlier = async (lastMessage: string, expectedRows?: number) => {
     for (let page = 0; page < ${history.pages + 1} && app.enabled(older); page += 1) {
@@ -1018,7 +1138,9 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   await revealMessage("text:" + chat.afterReply, 1);
   if (${target !== "headless"}) {
     await app.screenshot(${JSON.stringify(conversationScreenshot)});
-    console.log("Chat screenshots: " + ${JSON.stringify(permissionScreenshot)} + ", " + ${JSON.stringify(conversationScreenshot)});
+    console.log("Chat screenshots: " + ${JSON.stringify(
+      permissionScreenshot,
+    )} + ", " + ${JSON.stringify(conversationScreenshot)});
   }
   await app.press("role:button[刷新会话]");
   await app.waitFor("text:会话已同步", { timeout: 15000 });
@@ -1062,7 +1184,9 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
   await app.press(projectButton);
   await app.waitFor(projectPage);
   await app.waitFor(directory.workspaces, { timeout: 15000 });
-  await app.waitFor(${JSON.stringify(`text:已加载 ${agents.entries.length + 2} 个Agent`)}, { timeout: 15000 });
+  await app.waitFor(${JSON.stringify(
+    `text:已加载 ${agents.entries.length + 2} 个Agent`,
+  )}, { timeout: 15000 });
   await app.press(directory.workspace);
   await app.waitFor(directory.cwd);
   await app.waitFor(directory.provider, { timeout: 15000 });
@@ -1158,7 +1282,9 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
     assert(reconnectControl, "The real UI test must request its one-shot forced disconnect");
     await reconnectControl;
     if (reconnectControlError) throw reconnectControlError;
-    const after = await seed.agents.list({ filter: { projectKeys: [project.projectId] } });
+    const after = await seed.agents.list({
+      filter: { projectKeys: [project.projectId] },
+    });
     assert.equal(after.pageInfo.hasMore, false);
     assert.equal(
       after.entries.length,
@@ -1204,7 +1330,12 @@ test("Rust workspace creates Agents and chats through real daemon RPCs without m
     if (previousTmpdir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = previousTmpdir;
     await rm(testFile, { force: true });
-    await rm(scratch, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    await rm(scratch, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
   }
   for (const result of closing) {
     if (result.status === "rejected") {
