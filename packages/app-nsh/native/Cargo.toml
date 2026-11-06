@@ -1,0 +1,16 @@
+[package]
+name = "paseo-nsh"
+version = "0.15.2"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nsh-core = { path = "../../../../nsh/crates/nsh-core" }
+nsh-base = { path = "../../../../nsh/crates/nsh-base", default-features = false }
+url = "2"
+
+[dev-dependencies]
+nsh-engine = { path = "../../../../nsh/crates/nsh-engine", default-features = false }
+nsh-testing = { path = "../../../../nsh/crates/nsh-testing", default-features = false, features = ["live"] }

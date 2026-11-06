@@ -3,6 +3,8 @@
 ## Scope and completion rules
 
 Replace the Expo/React Native app UI on web, desktop, Android and iOS with NSH,
+using Rust for the application, state and native capabilities first. Use TSX
+sparingly only for capabilities Rust cannot provide, with a documented boundary.
 including each platform's supported capabilities. Keep the existing daemon wire
 contract and user-visible workflows. A rendered shell, a subset client, a WebView
 containing the old app, or headless-only results do not complete the migration.
@@ -13,13 +15,18 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 
 ## Architecture and upstream maintenance
 
-- `packages/app-nsh` owns NSH views and signal-based presentation state. React,
-  React Native and Expo component implementations cannot run in NSH's VM.
-- Reuse `packages/client`, `protocol`, `relay` and `highlight` where runtime
-  probes pass. Do not duplicate message schemas or weaken authentication.
-- Import existing framework-independent app functions directly. Move a function
-  into a shared leaf only when its imports actually prevent reuse; keep its tests.
-  Do not copy whole files into a second fork or shim all React hooks.
+- `packages/app-nsh/native` owns the Rust root, views, models and signal-based
+  presentation state. `nsh.json` selects `rust: native, root: App`; web builds
+  this root as WASM. The TSX feasibility entry is not the product root.
+- Treat `packages/client`, `protocol`, `relay` and existing pure app models as
+  the compatibility reference. The SDK probes exercise their actual behavior;
+  they do not imply the TS SDK runs in the Rust root. Rust wire models need
+  shared fixtures/generated contracts and bidirectional conformance tests.
+  Preserve missing/null/default semantics and authentication/downgrade defenses.
+- Port existing framework-independent behavior with source mappings and fixtures;
+  avoid manual copies of schemas and broad upstream rewrites. React Native/Expo
+  components cannot run as Rust components, and a hook compatibility shim is
+  not the migration strategy.
 - Keep UI models separated from transport and platform effects. Adapt NSH native
   APIs at those boundaries; missing native APIs require maintained host modules.
 - Track each migrated workflow against its upstream route/component and tests.
@@ -29,6 +36,13 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
   shared tests and parity scenarios, then advance the recorded baseline.
 - Third-party React Native plugin UI needs a compatibility surface or a versioned
   plugin contract with a migration path. Do not silently drop existing plugins.
+- Rust-root runners have no TSX VM. Prefer NSH Rust Editor/DiffView/TextView and
+  local WebView islands for browser-only code; introducing a TSX surface requires
+  an explicit host boundary, not switching the whole product back to TSX.
+- NSH currently exposes the WebSocket host transport but its high-level Rust
+  connection wrapper is crate-private. Validate a small shared native/web API
+  with the same capability, cancellation and backpressure behavior before
+  implementing the Rust daemon client.
 
 ## TODO and gates
 
@@ -40,6 +54,8 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 - [x] Execute SDK construction, Zod/generated validators, legacy relay crypto
   roundtrip and WebSocket URL validation in development QuickJS (2 tests).
 - [ ] Repeat SDK probes in release-hardened QuickJS (no dynamic constructors).
+- [ ] Build/test the Rust-root application and launch native Linux and web WASM.
+- [ ] Establish Rust WebSocket transport and typed daemon conformance tests.
 - [ ] Execute existing SDK, Zod, encryption and WebSocket in QuickJS and web.
 - [ ] Connect to an isolated real daemon: list projects, create agent, stream,
   send/cancel/retry, permission response, disconnect/reconnect, restart recovery.
@@ -108,6 +124,18 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 - [ ] Upstream-update rehearsal and complete requirement-by-requirement audit.
 
 ## Current evidence
+
+Rust-first feasibility: `native` is an independent Cargo workspace using the
+local NSH checkout. Its parser unit tests and a Rust-only headless input flow
+pass; `cargo check --target wasm32-unknown-unknown --lib` passes. This is a
+host-address validation surface, not an authenticated connection. Password URLs,
+SSH, local sockets and pairing remain separate unimplemented flows. The parser
+tracks the direct-address subset of `packages/protocol/src/host-target.ts`.
+
+```sh
+cargo test --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target
+cargo check --manifest-path packages/app-nsh/native/Cargo.toml --target-dir ../nsh/target --target wasm32-unknown-unknown --lib
+```
 
 From the sibling NSH checkout:
 

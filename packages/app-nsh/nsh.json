@@ -1,6 +1,8 @@
 {
   "name": "Paseo",
   "id": "sh.paseo.nsh",
+  "rust": "native",
+  "root": "App",
   "capabilities": {
     "network": { "hosts": ["localhost", "127.0.0.1", "[::1]"] }
   }

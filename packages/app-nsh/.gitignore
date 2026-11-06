@@ -1,2 +1,4 @@
 .nsh/
 dist/
+target/
+native/target/
