@@ -1,5 +1,7 @@
 //! Direct WebSocket protocol projection; wire authority is packages/protocol/src/messages.ts.
 
+pub(crate) mod catalog;
+
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::fmt;
@@ -73,6 +75,7 @@ pub(crate) fn list_projects(request_id: &str) -> String {
 pub(crate) enum ServerEvent {
     ServerInfo(ServerInfo),
     Projects(ProjectList),
+    Catalog(catalog::CatalogResponse),
     HelloRejected(HelloRejection),
     Pong,
     Unknown(Value),
@@ -201,7 +204,12 @@ pub(crate) fn parse_server_event(text: &str) -> Result<ServerEvent, ProtocolErro
                 "project.list.response" => Ok(ServerEvent::Projects(decode(
                     message.payload.ok_or_else(malformed)?,
                 )?)),
-                _ => Ok(ServerEvent::Unknown(frame)),
+                kind => {
+                    match catalog::parse_response(kind, message.payload.unwrap_or(Value::Null))? {
+                        Some(response) => Ok(ServerEvent::Catalog(response)),
+                        None => Ok(ServerEvent::Unknown(frame)),
+                    }
+                }
             }
         }
         _ => Ok(ServerEvent::Unknown(frame)),

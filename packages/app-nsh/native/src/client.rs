@@ -1,6 +1,9 @@
 //! Direct RPC client with one root-owned WebSocket reader.
 
 use crate::host::ParsedHost;
+use crate::protocol::catalog::{
+    self, AgentResult, Agents, CatalogResponse, ProviderFeatures, Providers, Workspaces,
+};
 use crate::protocol::{self, HelloRejection, ProjectList, ServerEvent, ServerInfo};
 use nsh_core::{
     element::{Spawned, spawn, timer},
@@ -70,7 +73,7 @@ impl From<HelloRejection> for ClientError {
 // No Debug: the socket and future protocol fields can carry credentials.
 pub(crate) struct Client {
     socket: Rc<WebSocket>,
-    pending: Rc<PendingProjects>,
+    pending: Rc<PendingRequests>,
     reader: Option<Spawned<()>>,
     on_state: Rc<dyn Fn(ClientError)>,
     server_info: ServerInfo,
@@ -95,7 +98,7 @@ impl Client {
             loop {
                 if let Some(server_info) = handshake_event(read_event(&socket).await?)? {
                     let socket = Rc::new(socket);
-                    let pending = Rc::new(PendingProjects::default());
+                    let pending = Rc::new(PendingRequests::default());
                     let on_state: Rc<dyn Fn(ClientError)> = Rc::new(on_state);
                     let read_socket = socket.clone();
                     let read_pending = pending.clone();
@@ -135,14 +138,108 @@ impl Client {
 
     pub(crate) async fn projects(&self) -> Result<ProjectList, ClientError> {
         let request_id = uuid::Uuid::new_v4().to_string();
-        let (guard, reply) = self.pending.register(request_id.clone())?;
+        match self
+            .request(
+                ReplyKind::Projects,
+                &request_id,
+                protocol::list_projects(&request_id),
+            )
+            .await?
+        {
+            PendingReply::Projects(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol),
+        }
+    }
+
+    pub(crate) async fn providers(&self, cwd: &str) -> Result<Providers, ClientError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        match self
+            .request(
+                ReplyKind::Providers,
+                &request_id,
+                catalog::providers(&request_id, cwd),
+            )
+            .await?
+        {
+            PendingReply::Providers(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol),
+        }
+    }
+
+    pub(crate) async fn provider_features(
+        &self,
+        provider: &str,
+        cwd: &str,
+    ) -> Result<ProviderFeatures, ClientError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        match self
+            .request(
+                ReplyKind::Features,
+                &request_id,
+                catalog::provider_features(&request_id, provider, cwd),
+            )
+            .await?
+        {
+            PendingReply::Features(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol),
+        }
+    }
+
+    pub(crate) async fn workspaces(
+        &self,
+        project_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<Workspaces, ClientError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let wire = catalog::workspaces_for_project(&request_id, project_id, cursor)
+            .map_err(|_| ClientError::InvalidProtocol)?;
+        match self
+            .request(ReplyKind::Workspaces, &request_id, wire)
+            .await?
+        {
+            PendingReply::Workspaces(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol),
+        }
+    }
+
+    pub(crate) async fn agents(
+        &self,
+        project_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<Agents, ClientError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let wire = catalog::agents_for_project(&request_id, project_id, cursor)
+            .map_err(|_| ClientError::InvalidProtocol)?;
+        match self.request(ReplyKind::Agents, &request_id, wire).await? {
+            PendingReply::Agents(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol),
+        }
+    }
+
+    pub(crate) async fn agent(&self, agent_id: &str) -> Result<AgentResult, ClientError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        match self
+            .request(
+                ReplyKind::Agent,
+                &request_id,
+                catalog::agent(&request_id, agent_id),
+            )
+            .await?
+        {
+            PendingReply::Agent(value) => Ok(value),
+            _ => Err(ClientError::InvalidProtocol),
+        }
+    }
+
+    async fn request(
+        &self,
+        expected: ReplyKind,
+        request_id: &str,
+        wire: String,
+    ) -> Result<PendingReply, ClientError> {
+        let (guard, reply) = self.pending.register(request_id.to_owned(), expected)?;
         let result = with_timeout(async {
-            if self
-                .socket
-                .write(WebSocketData::Text(protocol::list_projects(&request_id)))
-                .await
-                .is_err()
-            {
+            if self.socket.write(WebSocketData::Text(wire)).await.is_err() {
                 fail_connection(&self.pending, &self.on_state, ClientError::Transport);
                 return Err(ClientError::Transport);
             }
@@ -164,19 +261,19 @@ impl Drop for Client {
 }
 
 #[derive(Default)]
-struct PendingProjects {
-    slots: RefCell<HashMap<String, Rc<RefCell<ProjectReply>>>>,
+struct PendingRequests {
+    slots: RefCell<HashMap<String, Rc<RefCell<PendingSlot>>>>,
     failure: Cell<Option<ClientError>>,
 }
 
-#[derive(Default)]
-struct ProjectReply {
-    result: Option<Result<ProjectList, ClientError>>,
+struct PendingSlot {
+    expected: ReplyKind,
+    result: Option<Result<PendingReply, ClientError>>,
     waker: Option<Waker>,
 }
 
 struct PendingGuard {
-    pending: Rc<PendingProjects>,
+    pending: Rc<PendingRequests>,
     request_id: String,
 }
 
@@ -186,10 +283,10 @@ impl Drop for PendingGuard {
     }
 }
 
-struct ProjectResponse(Rc<RefCell<ProjectReply>>);
+struct Response(Rc<RefCell<PendingSlot>>);
 
-impl Future for ProjectResponse {
-    type Output = Result<ProjectList, ClientError>;
+impl Future for Response {
+    type Output = Result<PendingReply, ClientError>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let mut reply = self.0.borrow_mut();
@@ -203,15 +300,20 @@ impl Future for ProjectResponse {
     }
 }
 
-impl PendingProjects {
+impl PendingRequests {
     fn register(
         self: &Rc<Self>,
         request_id: String,
-    ) -> Result<(PendingGuard, ProjectResponse), ClientError> {
+        expected: ReplyKind,
+    ) -> Result<(PendingGuard, Response), ClientError> {
         if let Some(error) = self.failure.get() {
             return Err(error);
         }
-        let slot = Rc::new(RefCell::new(ProjectReply::default()));
+        let slot = Rc::new(RefCell::new(PendingSlot {
+            expected,
+            result: None,
+            waker: None,
+        }));
         self.slots
             .borrow_mut()
             .insert(request_id.clone(), slot.clone());
@@ -220,21 +322,39 @@ impl PendingProjects {
                 pending: self.clone(),
                 request_id,
             },
-            ProjectResponse(slot),
+            Response(slot),
         ))
     }
 
     fn dispatch(&self, event: ServerEvent) -> Result<(), ClientError> {
-        match event {
-            ServerEvent::Projects(projects) => {
-                let slot = self.slots.borrow_mut().remove(&projects.request_id);
-                if let Some(slot) = slot {
-                    deliver(&slot, Ok(projects));
-                }
-            }
+        let reply = match event {
+            ServerEvent::Projects(value) => PendingReply::Projects(value),
+            ServerEvent::Catalog(value) => match value {
+                CatalogResponse::Providers(value) => PendingReply::Providers(value),
+                CatalogResponse::ProviderFeatures(value) => PendingReply::Features(value),
+                CatalogResponse::Workspaces(value) => PendingReply::Workspaces(value),
+                CatalogResponse::Agents(value) => PendingReply::Agents(value),
+                CatalogResponse::Agent(value) => PendingReply::Agent(value),
+            },
             ServerEvent::HelloRejected(reason) => return Err(reason.into()),
             // No event subscriptions are advertised yet. Unknown frames never resolve RPC slots.
-            ServerEvent::Unknown(_) | ServerEvent::Pong | ServerEvent::ServerInfo(_) => {}
+            ServerEvent::Unknown(_) | ServerEvent::Pong | ServerEvent::ServerInfo(_) => {
+                return Ok(());
+            }
+        };
+        let slot = {
+            let mut slots = self.slots.borrow_mut();
+            if slots
+                .get(reply.request_id())
+                .is_some_and(|slot| slot.borrow().expected == reply.kind())
+            {
+                slots.remove(reply.request_id())
+            } else {
+                None
+            }
+        };
+        if let Some(slot) = slot {
+            deliver(&slot, Ok(reply));
         }
         Ok(())
     }
@@ -252,7 +372,50 @@ impl PendingProjects {
     }
 }
 
-fn deliver(slot: &RefCell<ProjectReply>, result: Result<ProjectList, ClientError>) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplyKind {
+    Projects,
+    Providers,
+    Features,
+    Workspaces,
+    Agents,
+    Agent,
+}
+
+enum PendingReply {
+    Projects(ProjectList),
+    Providers(Providers),
+    Features(ProviderFeatures),
+    Workspaces(Workspaces),
+    Agents(Agents),
+    Agent(AgentResult),
+}
+
+impl PendingReply {
+    fn kind(&self) -> ReplyKind {
+        match self {
+            Self::Projects(_) => ReplyKind::Projects,
+            Self::Providers(_) => ReplyKind::Providers,
+            Self::Features(_) => ReplyKind::Features,
+            Self::Workspaces(_) => ReplyKind::Workspaces,
+            Self::Agents(_) => ReplyKind::Agents,
+            Self::Agent(_) => ReplyKind::Agent,
+        }
+    }
+
+    fn request_id(&self) -> &str {
+        match self {
+            Self::Projects(value) => &value.request_id,
+            Self::Providers(value) => &value.request_id,
+            Self::Features(value) => &value.request_id,
+            Self::Workspaces(value) => &value.request_id,
+            Self::Agents(value) => &value.request_id,
+            Self::Agent(value) => &value.request_id,
+        }
+    }
+}
+
+fn deliver(slot: &RefCell<PendingSlot>, result: Result<PendingReply, ClientError>) {
     let waker = {
         let mut reply = slot.borrow_mut();
         reply.result = Some(result);
@@ -264,7 +427,7 @@ fn deliver(slot: &RefCell<ProjectReply>, result: Result<ProjectList, ClientError
 }
 
 fn fail_connection(
-    pending: &PendingProjects,
+    pending: &PendingRequests,
     on_state: &Rc<dyn Fn(ClientError)>,
     error: ClientError,
 ) {
@@ -333,6 +496,118 @@ mod tests {
         protocol::parse_server_event(&frame.to_string()).unwrap()
     }
 
+    fn catalog_frame(request_id: &str) -> Value {
+        let capture: Vec<Value> =
+            serde_json::from_str(include_str!("../../protocol-fixtures/catalog.json")).unwrap();
+        capture
+            .into_iter()
+            .find(|entry| {
+                entry["direction"] == "server"
+                    && entry["frame"]["message"]["payload"]["requestId"] == request_id
+            })
+            .unwrap()["frame"]
+            .clone()
+    }
+
+    #[test]
+    fn catalog_fixtures_dispatch_only_to_the_registered_response_type() {
+        let pending = Rc::new(PendingRequests::default());
+        let mut cx = Context::from_waker(Waker::noop());
+        for (id, expected) in [
+            ("catalog-providers", ReplyKind::Providers),
+            ("catalog-features", ReplyKind::Features),
+            ("catalog-workspaces", ReplyKind::Workspaces),
+            ("catalog-agents", ReplyKind::Agents),
+            ("catalog-agent", ReplyKind::Agent),
+            ("catalog-missing-agent", ReplyKind::Agent),
+        ] {
+            let (_guard, reply) = pending.register(id.to_owned(), expected).unwrap();
+            let mut reply = pin!(reply);
+            assert!(reply.as_mut().poll(&mut cx).is_pending());
+            assert!(
+                handshake_event(event(&catalog_frame(id)))
+                    .unwrap()
+                    .is_none()
+            );
+            pending.dispatch(event(&catalog_frame(id))).unwrap();
+            let Poll::Ready(Ok(reply)) = reply.as_mut().poll(&mut cx) else {
+                panic!("catalog reply not delivered")
+            };
+            assert_eq!(reply.kind(), expected);
+            assert_eq!(reply.request_id(), id);
+            if id == "catalog-missing-agent" {
+                let PendingReply::Agent(reply) = reply else {
+                    panic!("wrong reply kind")
+                };
+                assert!(reply.agent.is_none());
+                assert!(reply.error.is_none());
+            }
+        }
+        assert!(pending.slots.borrow().is_empty());
+    }
+
+    #[test]
+    fn matching_request_id_with_the_wrong_response_type_does_not_complete_or_remove_the_slot() {
+        let pending = Rc::new(PendingRequests::default());
+        let (_guard, reply) = pending
+            .register("request".to_owned(), ReplyKind::Workspaces)
+            .unwrap();
+        let mut reply = pin!(reply);
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut wrong = catalog_frame("catalog-agents");
+        wrong["message"]["payload"]["requestId"] = json!("request");
+        pending.dispatch(event(&wrong)).unwrap();
+        assert!(reply.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(pending.slots.borrow().len(), 1);
+        let mut correct = catalog_frame("catalog-workspaces");
+        correct["message"]["payload"]["requestId"] = json!("request");
+        pending.dispatch(event(&correct)).unwrap();
+        assert!(matches!(
+            reply.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(PendingReply::Workspaces(_)))
+        ));
+        assert!(pending.slots.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_catalog_request_ignores_late_replies_and_preserves_server_error_fields() {
+        let pending = Rc::new(PendingRequests::default());
+        let (guard, response) = pending
+            .register("catalog-providers".to_owned(), ReplyKind::Providers)
+            .unwrap();
+        let mut cancelled = Box::pin(async move {
+            let _guard = guard;
+            response.await
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+        drop(cancelled);
+        pending
+            .dispatch(event(&catalog_frame("catalog-providers")))
+            .unwrap();
+        assert!(pending.slots.borrow().is_empty());
+
+        let (_guard, response) = pending
+            .register("catalog-features".to_owned(), ReplyKind::Features)
+            .unwrap();
+        let mut response = pin!(response);
+        let mut error = catalog_frame("catalog-features");
+        error["message"]["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("features");
+        error["message"]["payload"]["error"] = json!("Provider reported a catalog failure");
+        pending.dispatch(event(&error)).unwrap();
+        let Poll::Ready(Ok(PendingReply::Features(features))) = response.as_mut().poll(&mut cx)
+        else {
+            panic!("feature response not delivered")
+        };
+        assert!(features.features.is_none());
+        assert!(
+            matches!(features.error, catalog::Field::Value(error) if error == "Provider reported a catalog failure")
+        );
+    }
+
     #[test]
     fn only_a_compatible_server_info_completes_the_handshake() {
         let mut frame = fixtures()[1]["frame"].clone();
@@ -371,8 +646,10 @@ mod tests {
 
     #[test]
     fn projects_accepts_only_the_requested_response_identity() {
-        let pending = Rc::new(PendingProjects::default());
-        let (_guard, response) = pending.register("projects-populated".to_owned()).unwrap();
+        let pending = Rc::new(PendingRequests::default());
+        let (_guard, response) = pending
+            .register("projects-populated".to_owned(), ReplyKind::Projects)
+            .unwrap();
         let mut response = pin!(response);
         let mut cx = Context::from_waker(Waker::noop());
         let mut unrelated = fixtures()[5]["frame"].clone();
@@ -382,7 +659,8 @@ mod tests {
         assert!(response.as_mut().poll(&mut cx).is_pending());
         let frame = &fixtures()[5]["frame"];
         pending.dispatch(event(frame)).unwrap();
-        let Poll::Ready(Ok(projects)) = response.as_mut().poll(&mut cx) else {
+        let Poll::Ready(Ok(PendingReply::Projects(projects))) = response.as_mut().poll(&mut cx)
+        else {
             panic!("matching response not delivered")
         };
         assert_eq!(projects.projects[0].project_id, "fixture-project");
@@ -391,8 +669,10 @@ mod tests {
 
     #[test]
     fn cancelling_or_timing_out_a_request_removes_its_slot_and_ignores_late_responses() {
-        let pending = Rc::new(PendingProjects::default());
-        let (guard, response) = pending.register("cancelled".to_owned()).unwrap();
+        let pending = Rc::new(PendingRequests::default());
+        let (guard, response) = pending
+            .register("cancelled".to_owned(), ReplyKind::Projects)
+            .unwrap();
         let mut cancelled = Box::pin(async move {
             let _guard = guard;
             response.await
@@ -402,7 +682,9 @@ mod tests {
         drop(cancelled);
         assert!(pending.slots.borrow().is_empty());
 
-        let (guard, response) = pending.register("expired".to_owned()).unwrap();
+        let (guard, response) = pending
+            .register("expired".to_owned(), ReplyKind::Projects)
+            .unwrap();
         let expired = Cell::new(false);
         let deadline = std::future::poll_fn(|_| {
             if expired.get() {
@@ -427,7 +709,9 @@ mod tests {
         assert!(pending.slots.borrow().is_empty());
         assert_eq!(pending.failure.get(), None);
 
-        let (_guard, response) = pending.register("projects-populated".to_owned()).unwrap();
+        let (_guard, response) = pending
+            .register("projects-populated".to_owned(), ReplyKind::Projects)
+            .unwrap();
         let mut response = pin!(response);
         let mut late = fixtures()[5]["frame"].clone();
         late["message"]["payload"]["requestId"] = json!("expired");
@@ -442,9 +726,13 @@ mod tests {
 
     #[test]
     fn terminal_failure_notifies_once_and_finishes_all_pending_requests() {
-        let pending = Rc::new(PendingProjects::default());
-        let (_first, first) = pending.register("first".to_owned()).unwrap();
-        let (_second, second) = pending.register("second".to_owned()).unwrap();
+        let pending = Rc::new(PendingRequests::default());
+        let (_first, first) = pending
+            .register("first".to_owned(), ReplyKind::Projects)
+            .unwrap();
+        let (_second, second) = pending
+            .register("second".to_owned(), ReplyKind::Projects)
+            .unwrap();
         let notices = Rc::new(Cell::new(0));
         let callback_notices = notices.clone();
         let callback: Rc<dyn Fn(ClientError)> =
@@ -463,7 +751,9 @@ mod tests {
         assert_eq!(notices.get(), 1);
         assert!(pending.slots.borrow().is_empty());
         assert_eq!(
-            pending.register("after-close".to_owned()).err(),
+            pending
+                .register("after-close".to_owned(), ReplyKind::Projects)
+                .err(),
             Some(ClientError::Closed)
         );
     }
