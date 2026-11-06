@@ -36,7 +36,10 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 
 - [x] Inspect four-platform app entry points and NSH architecture.
 - [x] Record source baselines and establish a separate app package and branch.
-- [ ] Build local NSH CLI and execute signal/input/render probes.
+- [x] Build local NSH CLI and execute signal/input/render probes.
+- [x] Execute SDK construction, Zod/generated validators, legacy relay crypto
+  roundtrip and WebSocket URL validation in development QuickJS (2 tests).
+- [ ] Repeat SDK probes in release-hardened QuickJS (no dynamic constructors).
 - [ ] Execute existing SDK, Zod, encryption and WebSocket in QuickJS and web.
 - [ ] Connect to an isolated real daemon: list projects, create agent, stream,
   send/cancel/retry, permission response, disconnect/reconnect, restart recovery.
@@ -105,6 +108,26 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 - [ ] Upstream-update rehearsal and complete requirement-by-requirement audit.
 
 ## Current evidence
+
+From the sibling NSH checkout:
+
+```sh
+cargo build -p nsh-cli
+./target/debug/nsh test ../paseo/packages/app-nsh
+xvfb-run -a ./target/debug/nsh test ../paseo/packages/app-nsh/probes/render.test.tsx --target linux --filter runtime-default
+```
+
+Development QuickJS SDK probes pass after a startup `self = globalThis` alias
+allows TweetNaCl to find secure native Web Crypto rather than requiring Node
+crypto. SDK tests cover construction, schemas and legacy encrypted roundtrip,
+not a live connection or protected Noise negotiation. Linux GTK under Xvfb also
+passes the default-environment input/click test. Explicit platform-environment
+cases are for headless tests; real-host runs select `runtime-default`.
+
+The initial network grants intentionally cover loopback only. LAN/relay tests
+must add exact test endpoints; Android loopback needs adb reverse or a device
+reachable endpoint. The real-daemon harness's fake provider proves protocol
+behavior only; real model/provider acceptance is a separate gate.
 
 `probes/render.tsx` deliberately tests only NSH input/signals plus a directly
 imported upstream pure function. It is not the product shell or a terminal.

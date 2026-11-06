@@ -1,3 +1,4 @@
+/* oxlint-disable react-perf/jsx-no-new-function-as-prop -- NSH components execute once, without React re-renders. */
 import { mount, signal, Text, View } from "nsh";
 import { Button, Input } from "nsh/base";
 import { encodeTerminalPaste } from "../../app/src/terminal/runtime/terminal-paste";

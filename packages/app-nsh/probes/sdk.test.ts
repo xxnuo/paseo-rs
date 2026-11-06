@@ -1,3 +1,5 @@
+/* oxlint-disable import/no-unassigned-import -- Install the runtime alias before SDK modules evaluate. */
+import "../runtime/bootstrap";
 import { defaultWebSocketFactory } from "@getpaseo/client/internal/daemon-client-websocket-transport";
 import { expect, test } from "nsh/test";
 import { probeSdk } from "./sdk";
