@@ -84,10 +84,14 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
   omitted provider-default overrides, saved creation identity/configuration,
   result lookup and same-key retries after cancellation or uncertain errors.
 - [x] Typed chat RPCs and scoped local event delivery on the existing reader.
-- [x] Pure projected-history coverage and synchronization planner with upstream
-  fixture regressions; this is not yet a visible or complete timeline.
-- [ ] Connect timeline state to Client/UI and port live text/tool/turn reducers,
-  pending sends, cancellation confirmation, permissions and reconnect recovery.
+- [x] Projected-history coverage, paged visible history and live text/tool/turn
+  reduction on the existing Client, with a native virtualized conversation page.
+- [x] Durable draft/pending sends, same-ID unknown-delivery retry, cancellation
+  confirmation, permission actions and structured questions in the Rust UI.
+- [ ] Complete timeline-specific todo/compaction/plugin presentation, turn
+  footers, search/outline, attachments and full reconnect/cache restoration.
+- [ ] Agent/workspace attention and read-state synchronization, including
+  focus/blur and background visibility rules.
 - [ ] Onboarding, welcome, hosts and open/add-project flows.
 - [ ] Project list/settings, workspace creation/fork/import/archive and scripts.
 - [ ] Agent list, provider/profile/model selection and provider configuration.
@@ -134,11 +138,13 @@ NSH `5e3406d4dc6725fad73c02aa02f6638bc54bb949` (0.4.0).
 ## Current evidence
 
 Rust-first feasibility: `native` is an independent Cargo workspace using the
-local NSH checkout. At `ca57c0fd5`, all 71 Rust tests pass: 60 unit tests, two
-creation-recovery flows, four socket/directory lifecycle flows and five host-form
-flows (`/tmp/paseo-nsh-creation-platform-final-tests.log`). Creation recovery covers
+local NSH checkout. At `07fcf8fdf`, all 123 Rust tests pass: 108 unit tests, two
+creation-recovery flows, four conversation bootstrap/layout flows, four socket/
+directory lifecycle flows and five host-form flows
+(`/tmp/paseo-nsh-chat-layout-regression-tests.log`). Creation recovery covers
 timeout/no-snapshot errors and owner cancellation combined with a workspace move.
-The same revision passes the Web/WASM library check.
+The same revision passes the Web/WASM library check
+(`/tmp/paseo-nsh-chat-final-wasm.log`); full browser chat acceptance remains open.
 The connection implementation passed
 clippy with warnings denied before adding the terminal drawing probe; later DTOs
 still have unused-field warnings, so current warning-free clippy is not claimed. The Rust-root GTK input flow
@@ -235,15 +241,54 @@ typed chat requests/replies and local agent/creation events, with response-type,
 request-ID and optional subscription-token checks. Legacy event selection remains
 connection-wide and last-query-wins; local listener handles are not owned server
 subscriptions. Creation uses this Client; send/cancel/permissions/timeline APIs
-are not yet exposed by a conversation UI.
+are exposed by the Rust conversation page. Page disposal stops local delivery;
+the connection owns bounded release RPCs. Cancelled/timed-out subscription
+requests also reclaim late tokens, including replies received but not consumed
+before a page disappears. Duplicate replies cannot release an active token.
 
-The pure timeline module preserves projected source ranges, stable rows, epoch,
+The timeline module preserves projected source ranges, stable rows, epoch,
 generation, cached-versus-authoritative state and Tail/After/Before plans. Its
-local operation IDs are separate from Client-correlated wire UUIDs. Eleven unit
-regressions include actual captures, cross-boundary projection replacement,
-noncontiguous sources and independent client message IDs. Live events currently
-buffer and request authoritative catch-up; full live rendering, timeline UI,
-pending-send/permission reducers and reconnect integration remain open.
+local operation IDs are separate from Client-correlated wire UUIDs. Continuous
+committed events update the view immediately; provisional events cannot advance
+coverage or acknowledge a durable send. Bounded event recovery retains displayed
+rows and requests resynchronization after gaps or overflow. Explicit live segments
+keep anonymous reply chunks out of historical replies, and projected reconciliation
+claims each segment once while preserving uncovered suffixes and turn boundaries.
+Regressions include actual captures, noncontiguous tool coverage, same-text
+independent sends, delayed snapshots and response/stream ordering races.
+
+The GTK/Xvfb real-daemon workflow passes with 128 pre-existing history entries,
+multiple history pages and actual scroll gestures through recycled rows. It sends
+five messages, handles backend allow/deny action IDs, stops a provider waiting on
+a permission gate, sends a new message in the same Agent and reopens saved history.
+Independent SDK checks confirm each prompt was started/persisted once, the denied
+and cancelled writes did not happen and the Agent ends idle. This is fake-provider
+protocol/UI acceptance, not real model inference or a performance comparison.
+Evidence: `/tmp/paseo-nsh-chat-live-linux-final.log` and
+`packages/app-nsh/.nsh/evidence/chat-{permission,complete}-linux-a7ad6f3d-5c92-439a-9707-b8c4dbc3cdf7.png`.
+The identical flow also passes on the API 36 x86_64 Android emulator with actual
+native touch, text input and list scrolling. Independent SDK postconditions pass
+after its UI run (`/tmp/paseo-nsh-chat-live-android.log`); screenshots are retained
+as `chat-{permission,complete}-android-ceaf8559-7c30-4049-9503-79e725f87cdb.png` in
+the same evidence directory. Its temporary adb reverse mapping was removed.
+
+Bootstrap tests verify that a text chunk arriving before a Running snapshot does
+not disable Stop, and that late history cannot reopen a closed page. Compact
+390x480/390x600 root tests actually scroll, type and stop with permissions present.
+The permission pane budgets space for the composer and message viewport. Questions
+preserve backend actions and selectedActionId, validate answers and retain inputs
+on retries; changing the backend question structure rebuilds its controls.
+
+The conversation stores draft text and unresolved sends before transport writes;
+restored in-flight attempts become outcome-unknown and retain their message IDs.
+Canonical user coverage removes their local duplicate, whereas provisional echoes
+only affect presentation. Host reconnection currently returns to the host screen;
+automatic conversation restoration and durable timeline caching remain open.
+Known parity gaps include attention/read-state clearing on focus/blur and dedicated
+todo/compaction/plugin views. A fake provider may end a turn without a terminal
+tool update: the original App also keeps that raw tool status, so the Rust view
+must not fabricate a completed/cancelled tool result. Clear turn footers and
+missing-tool-result presentation still need porting and verification.
 
 Creation recovery persists the original key and configuration before sending.
 Timeout, owner disposal and a plain error without an authoritative creation
