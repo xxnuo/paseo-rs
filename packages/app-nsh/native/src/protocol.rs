@@ -1,6 +1,8 @@
 //! Direct WebSocket protocol projection; wire authority is packages/protocol/src/messages.ts.
 
 pub(crate) mod catalog;
+#[cfg(test)]
+pub(crate) mod conversation;
 
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::{Value, json};
