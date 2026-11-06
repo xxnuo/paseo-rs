@@ -11,12 +11,14 @@ use nsh_core::prelude::*;
 use serde_json::{Map, Value};
 use std::rc::Rc;
 
+#[derive(PartialEq, Eq)]
 struct QuestionOption {
     label: String,
     description: Option<String>,
     preview: Option<String>,
 }
 
+#[derive(PartialEq, Eq)]
 struct Question {
     question: String,
     header: String,
@@ -33,6 +35,35 @@ struct Answer {
     // Preserve selection order, as the original question form's Set does.
     selected: Vec<usize>,
     other: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ControlsShape {
+    kind: PermissionKind,
+    question_input: Option<Map<String, Value>>,
+    actions: Vec<(String, bool)>,
+}
+
+fn controls_shape(request: &PermissionRequest) -> ControlsShape {
+    ControlsShape {
+        kind: request.kind.clone(),
+        question_input: if request.kind == PermissionKind::Question {
+            request.input.clone()
+        } else {
+            None
+        },
+        actions: request
+            .actions
+            .iter()
+            .flatten()
+            .map(|action| {
+                (
+                    action.id.clone(),
+                    matches!(action.behavior, PermissionBehavior::Allow),
+                )
+            })
+            .collect(),
+    }
 }
 
 fn optional_string(value: &Value, key: &str) -> Option<String> {
@@ -144,12 +175,8 @@ fn question_response(
     questions: &[Question],
     answers: &[Answer],
 ) -> Option<PermissionResponse> {
-    if questions.is_empty()
-        || questions.len() != answers.len()
-        || !questions
-            .iter()
-            .zip(answers)
-            .all(|(question, answer)| question.answered(answer))
+    if !all_answered(Some(questions), answers)
+        || parse_questions(request.input.as_ref())?.as_slice() != questions
     {
         return None;
     }
@@ -162,6 +189,48 @@ fn question_response(
         selected_action_id: None,
         updated_input: Some(updated_input),
         updated_permissions: None,
+    })
+}
+
+fn all_answered(questions: Option<&[Question]>, answers: &[Answer]) -> bool {
+    questions.is_some_and(|questions| {
+        !questions.is_empty()
+            && questions.len() == answers.len()
+            && questions
+                .iter()
+                .zip(answers)
+                .all(|(question, answer)| question.answered(answer))
+    })
+}
+
+fn question_action_response(
+    request: &PermissionRequest,
+    index: usize,
+    questions: Option<&[Question]>,
+    answers: &[Answer],
+) -> Option<PermissionResponse> {
+    let action = request.actions.as_ref()?.get(index)?;
+    Some(match action.behavior {
+        PermissionBehavior::Allow => {
+            let PermissionResponse::Allow {
+                updated_input,
+                updated_permissions,
+                ..
+            } = question_response(request, questions?, answers)?
+            else {
+                return None;
+            };
+            PermissionResponse::Allow {
+                selected_action_id: Some(action.id.clone()),
+                updated_input,
+                updated_permissions,
+            }
+        }
+        PermissionBehavior::Deny => PermissionResponse::Deny {
+            selected_action_id: Some(action.id.clone()),
+            message: Some("Denied by user".into()),
+            interrupt: None,
+        },
     })
 }
 
@@ -216,13 +285,17 @@ pub(super) fn card(
     state: Rc<Conversation>,
     pending: ReadSignal<PendingPermission>,
 ) -> impl IntoElement {
-    let question =
-        pending.with_untracked(|pending| pending.request.kind == PermissionKind::Question);
-    let content = if question {
-        questions(state, pending).into_element()
-    } else {
-        actions(state, pending).into_element()
-    };
+    let structure = computed(move || pending.with(|pending| controls_shape(&pending.request)));
+    let content = dynamic(move || {
+        let question = structure.with(|structure| structure.kind == PermissionKind::Question);
+        untracked(|| {
+            if question {
+                questions(state.clone(), pending).into_element()
+            } else {
+                actions(state.clone(), pending).into_element()
+            }
+        })
+    });
     view()
         .p_3()
         .gap_2()
@@ -361,21 +434,7 @@ fn questions(state: Rc<Conversation>, pending: ReadSignal<PendingPermission>) ->
         return view()
             .gap_2()
             .child(text("暂不支持此问题格式，无法提交答案；可拒绝此请求"))
-            .child(
-                button()
-                    .disabled(move || {
-                        pending.with(|pending| pending.status == PermissionStatus::Submitting)
-                    })
-                    .on_press(move || {
-                        state.respond(
-                            pending.with_untracked(|pending| pending.request.id.clone()),
-                            deny(),
-                        )
-                    })
-                    .p_2()
-                    .child(text("拒绝")),
-            )
-            .child(button().disabled(true).p_2().child(text("提交答案")))
+            .child(question_actions(state, pending, None, signal(Vec::new())))
             .into_element();
     };
     let questions = Rc::new(parsed);
@@ -483,6 +542,97 @@ fn questions(state: Rc<Conversation>, pending: ReadSignal<PendingPermission>) ->
         }
         form = form.child(block);
     }
+    form.child(question_actions(state, pending, Some(questions), answers))
+        .into_element()
+}
+
+fn question_actions(
+    state: Rc<Conversation>,
+    pending: ReadSignal<PendingPermission>,
+    questions: Option<Rc<Vec<Question>>>,
+    answers: Signal<Vec<Answer>>,
+) -> impl IntoElement {
+    let count =
+        pending.with_untracked(|pending| pending.request.actions.as_ref().map_or(0, Vec::len));
+    if count > 0 {
+        let mut controls = view().gap_2();
+        for index in 0..count {
+            let disabled_models = questions.clone();
+            let submit_models = questions.clone();
+            let state = state.clone();
+            controls = controls.child(
+                button()
+                    .disabled(move || {
+                        pending.with(|pending| {
+                            pending.status == PermissionStatus::Submitting
+                                || pending
+                                    .request
+                                    .actions
+                                    .as_ref()
+                                    .and_then(|actions| actions.get(index))
+                                    .is_none_or(|action| {
+                                        matches!(action.behavior, PermissionBehavior::Allow)
+                                            && !answers.with(|answers| {
+                                                all_answered(
+                                                    disabled_models.as_deref().map(Vec::as_slice),
+                                                    answers,
+                                                )
+                                            })
+                                    })
+                        })
+                    })
+                    .on_press(move || {
+                        let choice = pending.with_untracked(|pending| {
+                            answers.with_untracked(|answers| {
+                                question_action_response(
+                                    &pending.request,
+                                    index,
+                                    submit_models.as_deref().map(Vec::as_slice),
+                                    answers,
+                                )
+                                .map(|response| (pending.request.id.clone(), response))
+                            })
+                        });
+                        if let Some((id, response)) = choice {
+                            state.respond(id, response);
+                        }
+                    })
+                    .p_2()
+                    .child(text(move || {
+                        pending.with(|pending| {
+                            pending
+                                .request
+                                .actions
+                                .as_ref()
+                                .and_then(|actions| actions.get(index))
+                                .map(|action| action.label.clone())
+                                .unwrap_or_default()
+                        })
+                    })),
+            );
+        }
+        return controls.into_element();
+    }
+    let Some(questions) = questions else {
+        return view()
+            .gap_2()
+            .child(
+                button()
+                    .disabled(move || {
+                        pending.with(|pending| pending.status == PermissionStatus::Submitting)
+                    })
+                    .on_press(move || {
+                        state.respond(
+                            pending.with_untracked(|pending| pending.request.id.clone()),
+                            deny(),
+                        )
+                    })
+                    .p_2()
+                    .child(text("拒绝")),
+            )
+            .child(button().disabled(true).p_2().child(text("提交答案")))
+            .into_element();
+    };
     let dismiss_label = questions
         .iter()
         .find_map(|question| question.dismiss_label.clone())
@@ -491,62 +641,60 @@ fn questions(state: Rc<Conversation>, pending: ReadSignal<PendingPermission>) ->
     let disabled_models = questions.clone();
     let submit_models = questions.clone();
     let dismiss = state.clone();
-    form.child(
-        view()
-            .gap_2()
-            .child(
-                button()
-                    .disabled(move || {
-                        pending.with(|pending| pending.status == PermissionStatus::Submitting)
-                    })
-                    .on_press(move || {
-                        let id = pending.with_untracked(|pending| pending.request.id.clone());
-                        let empty_on_dismiss = dismiss_models
-                            .iter()
-                            .all(|question| question.allow_empty && question.options.is_empty());
-                        let response = if empty_on_dismiss {
-                            pending.with_untracked(|pending| {
-                                answers.with_untracked(|answers| {
-                                    question_response(&pending.request, &dismiss_models, answers)
-                                })
-                            })
-                        } else {
-                            Some(deny())
-                        };
-                        if let Some(response) = response {
-                            dismiss.respond(id, response);
-                        }
-                    })
-                    .p_2()
-                    .child(text(dismiss_label)),
-            )
-            .child(
-                button()
-                    .disabled(move || {
-                        pending.with(|pending| pending.status == PermissionStatus::Submitting)
-                            || !answers.with(|answers| {
-                                disabled_models
-                                    .iter()
-                                    .zip(answers)
-                                    .all(|(question, answer)| question.answered(answer))
-                            })
-                    })
-                    .on_press(move || {
-                        let id = pending.with_untracked(|pending| pending.request.id.clone());
-                        let response = pending.with_untracked(|pending| {
+    view()
+        .gap_2()
+        .child(
+            button()
+                .disabled(move || {
+                    pending.with(|pending| pending.status == PermissionStatus::Submitting)
+                })
+                .on_press(move || {
+                    let id = pending.with_untracked(|pending| pending.request.id.clone());
+                    let empty_on_dismiss = dismiss_models
+                        .iter()
+                        .all(|question| question.allow_empty && question.options.is_empty());
+                    let response = if empty_on_dismiss {
+                        pending.with_untracked(|pending| {
                             answers.with_untracked(|answers| {
-                                question_response(&pending.request, &submit_models, answers)
+                                question_response(&pending.request, &dismiss_models, answers)
                             })
-                        });
-                        if let Some(response) = response {
-                            state.respond(id, response);
-                        }
-                    })
-                    .p_2()
-                    .child(text("提交答案")),
-            ),
-    )
-    .into_element()
+                        })
+                    } else {
+                        Some(deny())
+                    };
+                    if let Some(response) = response {
+                        dismiss.respond(id, response);
+                    }
+                })
+                .p_2()
+                .child(text(dismiss_label)),
+        )
+        .child(
+            button()
+                .disabled(move || {
+                    pending.with(|pending| pending.status == PermissionStatus::Submitting)
+                        || !answers.with(|answers| {
+                            disabled_models
+                                .iter()
+                                .zip(answers)
+                                .all(|(question, answer)| question.answered(answer))
+                        })
+                })
+                .on_press(move || {
+                    let id = pending.with_untracked(|pending| pending.request.id.clone());
+                    let response = pending.with_untracked(|pending| {
+                        answers.with_untracked(|answers| {
+                            question_response(&pending.request, &submit_models, answers)
+                        })
+                    });
+                    if let Some(response) = response {
+                        state.respond(id, response);
+                    }
+                })
+                .p_2()
+                .child(text("提交答案")),
+        )
+        .into_element()
 }
 
 #[cfg(test)]
@@ -556,6 +704,110 @@ mod tests {
 
     fn questions(value: Value) -> Vec<Question> {
         parse_questions(value.as_object()).unwrap()
+    }
+
+    fn action_question() -> PermissionRequest {
+        serde_json::from_value(json!({"id":"p", "provider":"test", "name":"ask", "kind":"question", "actions":[
+            {"id":"send-answers", "label":"Send chosen answers", "behavior":"allow"},
+            {"id":"dismiss-question", "label":"Cancel this question", "behavior":"deny"}],
+            "input":{"providerOption":"keep", "questions":[{"question":"Q", "header":"Answer", "options":[]}]}})).unwrap()
+    }
+
+    #[test]
+    fn question_backend_actions_keep_identity_and_require_answered_updated_input() {
+        let request = Rc::new(action_question());
+        let parsed = parse_questions(request.input.as_ref()).unwrap();
+        assert!(
+            question_action_response(&request, 0, Some(&parsed), &[Answer::default()]).is_none()
+        );
+        let answers = [Answer {
+            other: " yes ".into(),
+            ..Default::default()
+        }];
+        let response = question_action_response(&request, 0, Some(&parsed), &answers).unwrap();
+        assert!(
+            matches!(&response, PermissionResponse::Allow { selected_action_id:Some(id), updated_input:Some(input), .. }
+            if id == "send-answers" && input["answers"] == json!({"Answer":"yes"}) && input["providerOption"] == "keep")
+        );
+        let mut transactions = crate::state::conversation::ConversationState::default();
+        transactions.request_permission("agent", request.clone());
+        assert_eq!(
+            transactions.begin_permission_response("agent", "p", response),
+            Some(1)
+        );
+        let denied =
+            question_action_response(&request, 1, Some(&parsed), &[Answer::default()]).unwrap();
+        assert!(
+            matches!(&denied, PermissionResponse::Deny { selected_action_id:Some(id), .. } if id == "dismiss-question")
+        );
+        let mut transactions = crate::state::conversation::ConversationState::default();
+        transactions.request_permission("agent", request);
+        assert_eq!(
+            transactions.begin_permission_response("agent", "p", denied),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn unsupported_question_input_keeps_backend_deny_but_never_allows() {
+        let mut request = action_question();
+        request.input = Some(Map::new());
+        assert!(parse_questions(request.input.as_ref()).is_none());
+        assert!(question_action_response(&request, 0, None, &[]).is_none());
+        let denied = question_action_response(&request, 1, None, &[]).unwrap();
+        assert!(
+            matches!(&denied, PermissionResponse::Deny { selected_action_id:Some(id), .. } if id == "dismiss-question")
+        );
+        let mut transactions = crate::state::conversation::ConversationState::default();
+        transactions.request_permission("agent", Rc::new(request));
+        assert_eq!(
+            transactions.begin_permission_response("agent", "p", denied),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_changed_question_cannot_submit_answers_from_the_old_controls() {
+        let mut request = action_question();
+        let parsed = parse_questions(request.input.as_ref()).unwrap();
+        request.input.as_mut().unwrap().insert(
+            "questions".into(),
+            json!([{ "question":"Different question", "header":"Different answer", "options":[] }]),
+        );
+        let answers = [Answer {
+            other: "old answer".into(),
+            ..Default::default()
+        }];
+        assert!(question_action_response(&request, 0, Some(&parsed), &answers).is_none());
+        assert!(question_response(&request, &parsed, &answers).is_none());
+        assert!(question_action_response(&request, 1, Some(&parsed), &answers).is_some());
+    }
+
+    #[test]
+    fn control_structure_preserves_equal_snapshots_and_rebuilds_for_model_or_action_changes() {
+        let request = action_question();
+        let original = controls_shape(&request);
+        let mut updated = request.clone();
+        updated.title = Some("Fresh title".into());
+        updated.actions.as_mut().unwrap()[0].label = "New label".into();
+        assert!(controls_shape(&updated) == original);
+        updated.input.as_mut().unwrap().insert(
+            "questions".into(),
+            json!([{ "question":"Updated Q", "header":"Answer", "options":[] }]),
+        );
+        assert!(controls_shape(&updated) != original);
+        let mut updated = request.clone();
+        updated.actions.as_mut().unwrap().pop();
+        assert!(controls_shape(&updated) != original);
+        let mut updated = request.clone();
+        updated.actions.as_mut().unwrap()[0].behavior = PermissionBehavior::Deny;
+        assert!(controls_shape(&updated) != original);
+        let mut updated = request.clone();
+        updated.actions.as_mut().unwrap()[0].id = "different-action".into();
+        assert!(controls_shape(&updated) != original);
+        let mut updated = request;
+        updated.kind = PermissionKind::Tool;
+        assert!(controls_shape(&updated) != original);
     }
 
     #[test]
